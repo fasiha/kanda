@@ -1,16 +1,9 @@
 import './index.css';
 
-// import {isRight} from 'fp-ts/lib/Either';
+// import E from 'fp-ts/lib/Either';
 import * as t from 'io-ts';
 import PR from 'io-ts/lib/PathReporter';
 
-{
-  const User = t.type({userId: t.number, name: t.string});
-  const result = User.decode({name: 'Giulio'});
-
-  // console.log(PathReporter.report(result))
-  console.log(PR.PathReporter.report(result));
-}
 /*
 import App from './App';
 import React, {createElement as ce} from 'react';
@@ -54,6 +47,9 @@ function findAncestor(e: Element|null, tag: string): Element|null {
   return e;
 }
 
+type IDict = t.TypeOf<typeof Dict>;
+const HASH_TO_DICT: Map<string, IDict> = new Map();
+
 async function clickHandler(e: Event): Promise<void> {
   const target: Element|null = findAncestor(e.target as any, 'MORPHEME');
   const parent = findAncestor(target, 'LINE');
@@ -70,25 +66,33 @@ async function clickHandler(e: Event): Promise<void> {
       return;
     }
     const hash = lineId.slice(HASH_PREFIX.length);
-    const response = await fetch(`/dict-hits-per-line/line-${hash}.json`);
-    if (response.ok) {
-      const decoded = Dict.decode(await response.json());
-      if (decoded._tag === 'Right') {
-        // we could do basic checks here like ensuring we have as many morphemes in `bunsetsus` and `dictHits` as
-        // `children` above
+    let dict: IDict|undefined;
+    if (HASH_TO_DICT.has(hash)) {
+      dict = HASH_TO_DICT.get(hash);
+    } else {
+      const response = await fetch(`/dict-hits-per-line/line-${hash}.json`);
+      if (response.ok) {
+        const decoded = Dict.decode(await response.json());
+        if (decoded._tag === 'Right') {
+          // we could do basic checks here like ensuring we have as many morphemes in `bunsetsus` and `dictHits` as
+          // `children` above
 
-        const hits = decoded.right.dictHits[morphemeIdx];
-        if (hits && hits.length) {
-          // found some hits
-          console.log(hits);
+          dict = decoded.right;
+          HASH_TO_DICT.set(hash, dict);
+        } else {
+          console.log(PR.PathReporter.report(decoded))
+          console.error(`Error decoding dictionary results sidecar file`);
         }
       } else {
-        console.log(PR.PathReporter.report(decoded))
-
-        console.error(`Error decoding dictionary results sidecar file`);
+        console.error('Error requesting dictionary results sidecar file', response.statusText);
       }
-    } else {
-      console.error('Error requesting dictionary results sidecar file', response.statusText);
+    }
+    if (dict) {
+      const hits = dict.dictHits[morphemeIdx];
+      if (hits && hits.length) {
+        // found some hits
+        console.log(hits);
+      }
     }
   }
 }
