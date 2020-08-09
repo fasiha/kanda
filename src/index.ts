@@ -80,7 +80,7 @@ async function clickHandler(e: Event): Promise<void> {
           dict = decoded.right;
           HASH_TO_DICT.set(hash, dict);
         } else {
-          console.log(PR.PathReporter.report(decoded))
+          console.error(PR.PathReporter.report(decoded))
           console.error(`Error decoding dictionary results sidecar file`);
         }
       } else {
@@ -91,7 +91,8 @@ async function clickHandler(e: Event): Promise<void> {
       const hits = dict.dictHits[morphemeIdx];
       if (hits && hits.length) {
         // found some hits
-        console.log(hits);
+        const s: string = hits.map(v => '- ' + v.map(o => o.summary).join('\n- ')).join('\n\n');
+        console.log(s);
       }
     }
   }
