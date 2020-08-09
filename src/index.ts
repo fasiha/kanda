@@ -49,9 +49,14 @@ const Dict = t.type({
 
 const HASH_PREFIX = 'hash-';
 
+function findAncestor(e: Element|null, tag: string): Element|null {
+  while (e && e.tagName !== tag) { e = e.parentElement; }
+  return e;
+}
+
 async function clickHandler(e: Event): Promise<void> {
-  const target: Element|null = e.target as any;
-  const parent: Element|null|undefined = target?.parentElement;
+  const target: Element|null = findAncestor(e.target as any, 'MORPHEME');
+  const parent = findAncestor(target, 'LINE');
   const lineId = parent?.id;
   if (lineId && lineId.startsWith(HASH_PREFIX) && parent && target?.nodeName === 'MORPHEME') {
     const children = parent.querySelectorAll('morpheme');
