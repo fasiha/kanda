@@ -26,12 +26,28 @@ const Dict = t.type({
   bunsetsus: t.array(t.array(Morpheme)),
   dictHits: t.array(t.array(t.array(ScoreHit))),
 });
+const Lightweight =
+    t.array(t.union([t.string, t.type({line: t.string, hash: t.string, furigana: t.array(t.array(Furigana))})]));
 
 const DICT_PATH = '/dict-hits-per-line';
 
-type DocumentData = (t.TypeOf<typeof Dict>|string)[];
+type DictData = (t.TypeOf<typeof Dict>|string)[];
+type LightData = t.TypeOf<typeof Lightweight>;
 
-export async function setupDoc(docFilename: string): Promise<DocumentData|undefined> {
+export async function setupLightweightJson(docFilename: string): Promise<LightData|undefined> {
+  const response = await fetch(DICT_PATH + '/' + docFilename);
+  if (!response.ok) {
+    console.error(`Failed to fetch ${docFilename}: ${response.statusText}`);
+    return undefined;
+  }
+  const decoded = Lightweight.decode(await response.json());
+  if (decoded._tag === 'Right') { return decoded.right; }
+  console.error(PR.PathReporter.report(decoded))
+  console.error(`Failed to decode ${docFilename}`);
+  return undefined;
+}
+
+export async function setupMarkdown(docFilename: string): Promise<DictData|undefined> {
   const response = await fetch(DICT_PATH + '/' + docFilename);
   if (!response.ok) {
     console.error(`Failed to fetch ${docFilename}: ${response.statusText}`);
@@ -63,7 +79,7 @@ Accept changes in reading & mass-apply them & apply them for future occurrences 
 */
 
 export interface DocProps {
-  data: DocumentData|undefined
+  data: LightData|undefined
 }
 export function Doc({data}: DocProps) {
   if (!data) { return ce('p', null, ''); }

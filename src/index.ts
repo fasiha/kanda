@@ -6,9 +6,9 @@ import PR from 'io-ts/lib/PathReporter';
 import React, {createElement as ce} from 'react';
 import ReactDOM from 'react-dom';
 
-import {Doc, setupDoc} from './Doc';
+import {Doc, setupLightweightJson} from './Doc';
 
-const docPromise = setupDoc('jb.md');
+const docPromise = setupLightweightJson('jb.json');
 docPromise.then(data => ReactDOM.render(ce(React.StrictMode, null, ce(Doc, {data})), document.getElementById('root')));
 
 const Morpheme = t.type({
