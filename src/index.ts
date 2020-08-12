@@ -3,16 +3,13 @@ import './index.css';
 // import E from 'fp-ts/lib/Either';
 import * as t from 'io-ts';
 import PR from 'io-ts/lib/PathReporter';
-
-/*
-import App from './App';
 import React, {createElement as ce} from 'react';
 import ReactDOM from 'react-dom';
-ReactDOM.render(
-ce(React.StrictMode, null, ce(App)),
-document.getElementById('root'),
-);
-*/
+
+import {Doc, setupDoc} from './Doc';
+
+const docPromise = setupDoc('jb.md');
+docPromise.then(data => ReactDOM.render(ce(React.StrictMode, null, ce(Doc, {data})), document.getElementById('root')));
 
 const Morpheme = t.type({
   literal: t.string,
