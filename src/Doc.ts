@@ -32,7 +32,8 @@ const Lightweight =
 
 const DICT_PATH = '/dict-hits-per-line';
 
-type DictData = (t.TypeOf<typeof Dict>|string)[];
+type IDict = t.TypeOf<typeof Dict>;
+type DictData = (IDict|string)[];
 type LightData = t.TypeOf<typeof Lightweight>;
 
 export async function setupLightweightJson(docFilename: string): Promise<LightData|undefined> {
@@ -83,16 +84,50 @@ export interface DocProps {
   data: LightData|undefined
 }
 
-function renderLightweight(line: LightData[0], defMorphemeProps: HTMLAttributes<HTMLSpanElement> = {}) {
+const HASH_TO_DICT: Map<string, IDict> = new Map();
+async function getHash(hash: string): Promise<IDict|undefined> {
+  const hit = HASH_TO_DICT.get(hash);
+  if (hit) { return hit; }
+  const response = await fetch(`/dict-hits-per-line/line-${hash}.json`);
+  if (response.ok) {
+    const decoded = Dict.decode(await response.json());
+    if (decoded._tag === 'Right') {
+      const dict = decoded.right;
+      HASH_TO_DICT.set(hash, dict);
+      return dict;
+    } else {
+      console.error(PR.PathReporter.report(decoded))
+      console.error(`Error decoding dictionary results sidecar file`);
+    }
+  } else {
+    console.error('Error requesting dictionary results sidecar file', response.statusText);
+  }
+  return undefined;
+}
+
+async function clickMorpheme(event: React.MouseEvent<Element, MouseEvent>, hash: string,
+                             morphemeIdx: number): Promise<void> {
+  const dict = await getHash(hash);
+  if (dict) {
+    const hits = dict.dictHits[morphemeIdx];
+    if (hits && hits.length) {
+      // found some hits
+      const s: string = hits.map(v => '- ' + v.map(o => o.summary).join('\n- ')).join('\n\n');
+      console.log(s);
+    }
+  }
+}
+
+function renderLightweight(line: LightData[0]) {
   if (typeof line === 'string') { return line; }
-  const morphemeProps = {is: 'span', ...defMorphemeProps};
   return ce(
-      Fragment, null,
+      'line', {is: 'span', id: 'hash-' + line.hash},
       ...line.furigana.map(
-          f => typeof f === 'string'
-                   ? ce('morpheme', morphemeProps, f)
-                   : ce('morpheme', morphemeProps,
-                        ...f.map(r => typeof r === 'string' ? r : ce('ruby', null, r.ruby, ce('rt', null, r.rt))))));
+          (f, fidx) =>
+              typeof f === 'string'
+                  ? ce('morpheme', {onClick: e => clickMorpheme(e, line.hash, fidx), is: 'span'}, f)
+                  : ce('morpheme', {onClick: e => clickMorpheme(e, line.hash, fidx), is: 'span'},
+                       ...f.map(r => typeof r === 'string' ? r : ce('ruby', null, r.ruby, ce('rt', null, r.rt))))));
 }
 
 export function Doc({data}: DocProps) {
