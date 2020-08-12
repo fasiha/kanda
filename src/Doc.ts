@@ -1,6 +1,7 @@
 import * as t from 'io-ts';
 import PR from 'io-ts/lib/PathReporter';
-import React, {createElement as ce, Fragment} from 'react';
+import React,
+{ButtonHTMLAttributes, ClassAttributes, createElement as ce, DOMAttributes, Fragment, HTMLAttributes} from 'react';
 
 const Morpheme = t.type({
   literal: t.string,
@@ -82,14 +83,15 @@ export interface DocProps {
   data: LightData|undefined
 }
 
-function renderLightweight(line: LightData[0]) {
+function renderLightweight(line: LightData[0], defMorphemeProps: HTMLAttributes<HTMLSpanElement> = {}) {
   if (typeof line === 'string') { return line; }
+  const morphemeProps = {is: 'span', ...defMorphemeProps};
   return ce(
       Fragment, null,
       ...line.furigana.map(
           f => typeof f === 'string'
-                   ? ce('morpheme', {is: 'span'}, f)
-                   : ce('morpheme', {is: 'span'},
+                   ? ce('morpheme', morphemeProps, f)
+                   : ce('morpheme', morphemeProps,
                         ...f.map(r => typeof r === 'string' ? r : ce('ruby', null, r.ruby, ce('rt', null, r.rt))))));
 }
 
