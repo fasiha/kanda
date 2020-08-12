@@ -1,6 +1,6 @@
 import * as t from 'io-ts';
 import PR from 'io-ts/lib/PathReporter';
-import React, {createElement as ce} from 'react';
+import React, {createElement as ce, Fragment} from 'react';
 
 const Morpheme = t.type({
   literal: t.string,
@@ -81,7 +81,19 @@ Accept changes in reading & mass-apply them & apply them for future occurrences 
 export interface DocProps {
   data: LightData|undefined
 }
+
+function renderLightweight(line: LightData[0]) {
+  if (typeof line === 'string') { return line; }
+  return ce(
+      Fragment, null,
+      ...line.furigana.map(
+          f => typeof f === 'string'
+                   ? ce('morpheme', {is: 'span'}, f)
+                   : ce('morpheme', {is: 'span'},
+                        ...f.map(r => typeof r === 'string' ? r : ce('ruby', null, r.ruby, ce('rt', null, r.rt))))));
+}
+
 export function Doc({data}: DocProps) {
   if (!data) { return ce('p', null, ''); }
-  return ce('div', null, ...data.map(o => ce('p', null, typeof o === 'string' ? o : o.line)));
+  return ce('div', null, ...data.map(o => ce('p', null, renderLightweight(o))));
 }
