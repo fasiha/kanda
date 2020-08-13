@@ -1,7 +1,6 @@
 import * as t from 'io-ts';
 import PR from 'io-ts/lib/PathReporter';
-import React,
-{ButtonHTMLAttributes, ClassAttributes, createElement as ce, DOMAttributes, Fragment, HTMLAttributes} from 'react';
+import React, {createElement as ce, useState} from 'react';
 
 const Morpheme = t.type({
   literal: t.string,
@@ -32,6 +31,7 @@ const Lightweight =
 
 const DICT_PATH = '/dict-hits-per-line';
 
+type IScoreHit = t.TypeOf<typeof ScoreHit>;
 type IDict = t.TypeOf<typeof Dict>;
 type DictData = (IDict|string)[];
 type LightData = t.TypeOf<typeof Lightweight>;
@@ -105,12 +105,13 @@ async function getHash(hash: string): Promise<IDict|undefined> {
   return undefined;
 }
 
-async function clickMorpheme(event: React.MouseEvent<Element, MouseEvent>, hash: string,
-                             morphemeIdx: number): Promise<void> {
+async function clickMorpheme(event: React.MouseEvent<Element, MouseEvent>, hash: string, morphemeIdx: number,
+                             setHits: SetState<PopupProps['hits']>): Promise<void> {
   const dict = await getHash(hash);
   if (dict) {
     const hits = dict.dictHits[morphemeIdx];
     if (hits && hits.length) {
+      setHits(hits);
       // found some hits
       const s: string = hits.map(v => '- ' + v.map(o => o.summary).join('\n- ')).join('\n\n');
       console.log(s);
@@ -118,19 +119,30 @@ async function clickMorpheme(event: React.MouseEvent<Element, MouseEvent>, hash:
   }
 }
 
-function renderLightweight(line: LightData[0]) {
+type SetState<T> = React.Dispatch<React.SetStateAction<T>>;
+
+function renderLightweight(line: LightData[0], setHits: SetState<PopupProps['hits']>) {
   if (typeof line === 'string') { return line; }
   return ce(
       'line', {is: 'span', id: 'hash-' + line.hash},
       ...line.furigana.map(
           (f, fidx) =>
               typeof f === 'string'
-                  ? ce('morpheme', {onClick: e => clickMorpheme(e, line.hash, fidx), is: 'span'}, f)
-                  : ce('morpheme', {onClick: e => clickMorpheme(e, line.hash, fidx), is: 'span'},
+                  ? ce('morpheme', {onClick: e => clickMorpheme(e, line.hash, fidx, setHits), is: 'span'}, f)
+                  : ce('morpheme', {onClick: e => clickMorpheme(e, line.hash, fidx, setHits), is: 'span'},
                        ...f.map(r => typeof r === 'string' ? r : ce('ruby', null, r.ruby, ce('rt', null, r.rt))))));
 }
 
+interface PopupProps {
+  hits: IScoreHit[][]
+}
+function Popup({hits}: PopupProps) {
+  return ce('ul', null,
+            ...hits.map(stops => ce('li', null, ce('ol', null, ...stops.map(hit => ce('li', null, hit.summary))))));
+}
+
 export function Doc({data}: DocProps) {
+  const [hits, setHits] = useState([] as PopupProps['hits']);
   if (!data) { return ce('p', null, ''); }
-  return ce('div', null, ...data.map(o => ce('p', null, renderLightweight(o))));
+  return ce('div', null, ce(Popup, {hits}), ...data.map(o => ce('p', null, renderLightweight(o, setHits))));
 }
