@@ -161,5 +161,5 @@ export function Doc({data}: DocProps) {
     setHits(x);
   };
   return ce('div', null, ce(Popup, {hits, hidden: hiddenPopup, setHidden: setHiddenPopup}),
-            ...data.map(o => ce('p', null, renderLightweight(o, setHitsOpenPopup))));
+            ...data.map(o => ce('p', {className: 'large-content'}, renderLightweight(o, setHitsOpenPopup))));
 }

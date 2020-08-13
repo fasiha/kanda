@@ -5,6 +5,8 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background: #32127A; /* Persian Indigo according to https://www.htmlcsscolor.com/hex/32127A */
+  color: lightgray;
 }
 
 code {

@@ -12,3 +12,7 @@
 .highlight-popup {
   color: white;
 }
+
+.large-content {
+  font-size: xx-large; /* xxx-large is unsupported in Safari as of Aug 2020 */
+}
