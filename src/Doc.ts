@@ -140,7 +140,14 @@ function Popup({
   const button = ce('button', {onClick: e => setHidden(true)}, 'X');
   return ce('div', {id: "dict-popup"}, button,
             ce('ul', null,
-               ...hits.map(stops => ce('li', null, ce('ol', null, ...stops.map(hit => ce('li', null, hit.summary)))))));
+               ...hits.map(stops => ce('li', null,
+                                       ce('ol', null,
+                                          ...stops.map(hit => ce('li', null, ...highlight(hit.run, hit.summary))))))));
+}
+function highlight(needle: IScoreHit['run'], haystack: string) {
+  const needleChars = new Set((typeof needle === 'string' ? needle : needle.cloze).split(''));
+  return haystack.split('').map(c => needleChars.has(c) ? ce('span', {className: 'highlight-popup'}, c)
+                                                        : ce('span', null, c));
 }
 
 export function Doc({data}: DocProps) {
