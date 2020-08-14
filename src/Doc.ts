@@ -4,7 +4,7 @@ import * as t from 'io-ts';
 import PR from 'io-ts/lib/PathReporter';
 import PouchDB from 'pouchdb-browser';
 import PouchUpsert from 'pouchdb-upsert';
-import React, {createElement as ce, useState} from 'react';
+import React, {createElement as ce, useEffect, useState} from 'react';
 
 PouchDB.plugin(PouchUpsert);
 const db = new PouchDB('sidecar');
@@ -144,17 +144,76 @@ function Popup({
   setHidden,
 }: PopupProps) {
   if (hidden) { return ce('div', null); }
-  const button = ce('button', {onClick: e => setHidden(true)}, 'X');
-  return ce('div', {id: "dict-popup"}, button,
-            ce('ul', null,
-               ...hits.map(stops => ce('li', null,
-                                       ce('ol', null,
-                                          ...stops.map(hit => ce('li', null, ...highlight(hit.run, hit.summary))))))));
+
+  // set that we populate from Pouchdb when
+  // (1) *hits* changes (we clicked a morpheme) or
+  // (2) we clicked a dictionary hit to indicate it's marked as an annotation
+  const [subdb, setSubdb] = useState(new Set([]) as Set<string>);
+  // this is a hack: whenever we toggle a dictionary entry's annotation status, we'll write to Pouchdb in the onClick
+  // and then we want to refresh the above set. This counter will serve as a click-tracker... this might be ok but meh
+  const [counter, setCounter] = useState(0);
+  // this effect will build `subdb` by looping over Pouchdb `bulkGet`
+  useEffect(() => {
+    (async function() {
+      const results: PouchDB.Core.BulkGetResponse<AnnotatedWordIdDoc> =
+          await db.bulkGet({docs: hits.flatMap(v => v.flatMap(h => ({id: wordIdToKey(h.wordId)})))});
+      const newSubdb: typeof subdb = new Set();
+      results.results.forEach(({docs, id}) => docs.forEach(doc => {
+        if ('ok' in doc && doc.ok.include) { newSubdb.add(id); }
+      }));
+      setSubdb(newSubdb);
+    })();
+  }, [hits, counter]); // the final array ensures we only run this when either element changes, otherwise, infinite loop
+
+  // The popup itself.
+  const closeButton = ce('button', {onClick: e => setHidden(true)}, 'X');
+  return ce(
+      'div',
+      {id: "dict-popup"},
+      closeButton,
+      ce(
+          'ul',
+          null,
+          ...hits.map(
+              stops => ce(
+                  'li',
+                  null,
+                  ce(
+                      'ol',
+                      null,
+                      ...stops.map(
+                          hit => ce(
+                              'li',
+                              null,
+                              ...highlight(hit.run, hit.summary),
+                              ce(
+                                  'button',
+                                  {
+                                    onClick: () => toggleWordId(hit.wordId).then(({updated}) => {
+                                      if (updated) { setCounter(counter + 1); }
+                                    })
+                                  },
+                                  subdb.has(wordIdToKey(hit.wordId)) ? 'Flashcard!' : 'Not a flashcard',
+                                  ),
+                              ),
+                          ),
+                      ),
+                  ),
+              ),
+          ),
+  );
 }
 function highlight(needle: IScoreHit['run'], haystack: string) {
   const needleChars = new Set((typeof needle === 'string' ? needle : needle.cloze).split(''));
   return haystack.split('').map(c => needleChars.has(c) ? ce('span', {className: 'highlight-popup'}, c)
                                                         : ce('span', null, c));
+}
+function wordIdToKey(wordId: string) { return `annotated-wordId-${wordId}`; }
+interface AnnotatedWordIdDoc {
+  include: boolean;
+}
+function toggleWordId(wordId: string) {
+  return db.upsert(wordIdToKey(wordId), (doc: any) => ({...doc, include: !doc.include}));
 }
 
 export function Doc({data}: DocProps) {
