@@ -8,8 +8,6 @@ import React, {createElement as ce, useEffect, useState} from 'react';
 
 PouchDB.plugin(PouchUpsert);
 const db = new PouchDB('sidecar');
-db.upsert('yo', doc => ({text: 'yo ' + (new Date()).toISOString()})).then(_ => console.log('yo written?'));
-// db.put({_id: '' + Date.now(), text: 'yo'}).then(_ => console.log('yo written'));
 
 const Morpheme = t.type({
   literal: t.string,
@@ -189,7 +187,7 @@ function Popup({
                               ce(
                                   'button',
                                   {
-                                    onClick: () => toggleWordId(hit.wordId).then(({updated}) => {
+                                    onClick: () => toggleWordIdAnnotation(hit).then(({updated}) => {
                                       if (updated) { setCounter(counter + 1); }
                                     })
                                   },
@@ -211,9 +209,29 @@ function highlight(needle: IScoreHit['run'], haystack: string) {
 function wordIdToKey(wordId: string) { return `annotated-wordId-${wordId}`; }
 interface AnnotatedWordIdDoc {
   include: boolean;
+  wordId: string;
+  summary: string;
 }
-function toggleWordId(wordId: string) {
-  return db.upsert(wordIdToKey(wordId), (doc: any) => ({...doc, include: !doc.include}));
+function toggleWordIdAnnotation({wordId, summary}: IScoreHit) {
+  return db.upsert(wordIdToKey(wordId),
+                   (doc: Partial<AnnotatedWordIdDoc>) => ({...doc, include: !doc.include, wordId, summary}));
+}
+
+interface ListFlashcardsProps {}
+function ListFlashcards({}: ListFlashcardsProps) {
+  const [flashcards, setFlashcards] = useState(undefined as AnnotatedWordIdDoc[] | undefined);
+  useEffect(() => {
+    (async function() {
+      if (!flashcards) {
+        const startkey = wordIdToKey('');
+        const res = await db.allDocs<AnnotatedWordIdDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
+        const docs = res.rows.map(row => row.doc);
+        setFlashcards(docs.filter(x => !!x) as NonNullable<typeof docs[0]>[]);
+      }
+    })();
+  });
+
+  return ce('div', null, ce('ol', null, ...(flashcards || []).map(dict => ce('li', null, dict.summary))));
 }
 
 export function Doc({data}: DocProps) {
@@ -226,6 +244,6 @@ export function Doc({data}: DocProps) {
     setHiddenPopup(false);
     setHits(x);
   };
-  return ce('div', null, ce(Popup, {hits, hidden: hiddenPopup, setHidden: setHiddenPopup}),
+  return ce('div', null, ce(ListFlashcards), ce(Popup, {hits, hidden: hiddenPopup, setHidden: setHiddenPopup}),
             ...data.map(o => ce('p', {className: 'large-content'}, renderLightweight(o, setHitsOpenPopup))));
 }
