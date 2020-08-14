@@ -135,11 +135,13 @@ interface PopupProps {
   hits: IScoreHit[][];
   hidden: boolean;
   setHidden: SetState<boolean>;
+  fetchAllFlashcards: () => Promise<void>;
 }
 function Popup({
   hits,
   hidden,
   setHidden,
+  fetchAllFlashcards,
 }: PopupProps) {
   if (hidden) { return ce('div', null); }
 
@@ -187,7 +189,7 @@ function Popup({
                               ce(
                                   'button',
                                   {
-                                    onClick: () => toggleWordIdAnnotation(hit).then(({updated}) => {
+                                    onClick: () => toggleWordIdAnnotation(hit, fetchAllFlashcards).then(({updated}) => {
                                       if (updated) { setCounter(counter + 1); }
                                     })
                                   },
@@ -211,32 +213,39 @@ interface AnnotatedWordIdDoc {
   include: boolean;
   wordId: string;
   summary: string;
+  timestamp: number;
 }
-function toggleWordIdAnnotation({wordId, summary}: IScoreHit) {
-  return db.upsert(wordIdToKey(wordId),
-                   (doc: Partial<AnnotatedWordIdDoc>) => ({...doc, include: !doc.include, wordId, summary}));
+async function toggleWordIdAnnotation({wordId, summary}: IScoreHit,
+                                      fetchAllFlashcards: PopupProps['fetchAllFlashcards']) {
+  const timestamp = Date.now();
+  const x = await db.upsert(wordIdToKey(wordId), (doc: Partial<AnnotatedWordIdDoc>) =>
+                                                     ({...doc, include: !doc.include, wordId, summary, timestamp}));
+  fetchAllFlashcards(); // no await here, we don't care when this finishes
+  return x;
 }
 
-interface ListFlashcardsProps {}
-function ListFlashcards({}: ListFlashcardsProps) {
-  const [flashcards, setFlashcards] = useState(undefined as AnnotatedWordIdDoc[] | undefined);
-  useEffect(() => {
-    (async function() {
-      if (!flashcards) {
-        const startkey = wordIdToKey('');
-        const res = await db.allDocs<AnnotatedWordIdDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
-        const docs = res.rows.map(row => row.doc);
-        setFlashcards(docs.filter(x => !!x) as NonNullable<typeof docs[0]>[]);
-      }
-    })();
-  });
-
+interface ListFlashcardsProps {
+  flashcards: AnnotatedWordIdDoc[]|undefined;
+}
+function ListFlashcards({flashcards}: ListFlashcardsProps) {
   return ce('div', null, ce('ol', null, ...(flashcards || []).map(dict => ce('li', null, dict.summary))));
 }
 
 export function Doc({data}: DocProps) {
   const [hits, setHits] = useState([] as PopupProps['hits']);
   const [hiddenPopup, setHiddenPopup] = useState(true);
+  const [flashcards, setFlashcards] = useState(undefined as AnnotatedWordIdDoc[] | undefined);
+  const fetchAllFlashcards = (async function() {
+    const startkey = wordIdToKey('');
+    const res = await db.allDocs<AnnotatedWordIdDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
+    const docs = res.rows.map(row => row.doc);
+    const okDocs = docs.filter(x => !!x && x.include) as NonNullable<typeof docs[0]>[];
+    okDocs.sort((a, b) => a.timestamp - b.timestamp);
+    setFlashcards(okDocs);
+  });
+  useEffect(() => {
+    if (flashcards === undefined) { fetchAllFlashcards(); }
+  }, [flashcards === undefined]);
 
   if (!data) { return ce('p', null, ''); }
 
@@ -244,6 +253,7 @@ export function Doc({data}: DocProps) {
     setHiddenPopup(false);
     setHits(x);
   };
-  return ce('div', null, ce(ListFlashcards), ce(Popup, {hits, hidden: hiddenPopup, setHidden: setHiddenPopup}),
+  return ce('div', null, ce(ListFlashcards, {flashcards}),
+            ce(Popup, {hits, hidden: hiddenPopup, setHidden: setHiddenPopup, fetchAllFlashcards}),
             ...data.map(o => ce('p', {className: 'large-content'}, renderLightweight(o, setHitsOpenPopup))));
 }
