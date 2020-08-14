@@ -9,6 +9,8 @@
   "dependencies": {
     "fp-ts": "^2.8.1",
     "io-ts": "^2.2.9",
+    "pouchdb-browser": "^7.2.2",
+    "pouchdb-upsert": "^2.2.0",
     "react": "^16.13.1",
     "react-dom": "^16.13.1"
   },
@@ -16,10 +18,13 @@
     "@snowpack/app-scripts-react": "^1.8.4",
     "@testing-library/jest-dom": "^5.5.0",
     "@testing-library/react": "^10.0.3",
+    "@types/pouchdb-browser": "^6.1.3",
+    "@types/pouchdb-upsert": "^2.2.6",
     "@types/react": "^16.9.35",
     "@types/react-dom": "^16.9.8",
     "jest": "^26.2.2",
     "prettier": "^2.0.5",
+    "rollup-plugin-node-polyfills": "^0.2.1",
     "snowpack": "^2.7.7",
     "typescript": "^3.9.7"
   }

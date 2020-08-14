@@ -1,7 +1,0 @@
-{
-  "extends": "@snowpack/app-scripts-react",
-  "plugins": [],
-  "mount": {
-    "/dict-hits-per-line": "/dict-hits-per-line"
-  }
-}

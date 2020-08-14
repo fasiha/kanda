@@ -2,7 +2,14 @@ import './Doc.css';
 
 import * as t from 'io-ts';
 import PR from 'io-ts/lib/PathReporter';
+import PouchDB from 'pouchdb-browser';
+import PouchUpsert from 'pouchdb-upsert';
 import React, {createElement as ce, useState} from 'react';
+
+PouchDB.plugin(PouchUpsert);
+const db = new PouchDB('sidecar');
+db.upsert('yo', doc => ({text: 'yo ' + (new Date()).toISOString()})).then(_ => console.log('yo written?'));
+// db.put({_id: '' + Date.now(), text: 'yo'}).then(_ => console.log('yo written'));
 
 const Morpheme = t.type({
   literal: t.string,
