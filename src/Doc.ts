@@ -291,16 +291,17 @@ interface Location {
 const locationAtom = Recoil.atom({key: 'location', default: undefined as undefined | Location})
 
 export interface DocProps {
-  data: LightData|undefined, documentName: string,
+  data: LightData|undefined;
+  documentName: string;
 }
 export function Doc({data, documentName}: DocProps) {
-  const [atom, setAtom] = Recoil.useRecoilState(docAtom);
+  const setDoc = Recoil.useSetRecoilState(docAtom);
   const setLocation = Recoil.useSetRecoilState(locationAtom);
 
   const [hits, setHits] = useState([] as PopupProps['hits']);
   const [hiddenPopup, setHiddenPopup] = useState(true);
-  useEffect(() => { getFlashcards(documentName).then(flashcards => setAtom({documentName, flashcards})); },
-            [atom.documentName === documentName]);
+  useEffect(() => { getFlashcards(documentName).then(flashcards => setDoc({documentName, flashcards})); },
+            [documentName]);
 
   if (!data) { return ce('p', null, ''); }
 
