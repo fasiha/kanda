@@ -109,22 +109,33 @@ async function getHash(hash: string): Promise<IDict|undefined> {
   return undefined;
 }
 
-async function clickMorpheme(hash: string, morphemeIdx: number, setHits: SetState<PopupProps['hits']>): Promise<void> {
-  const dict = await getHash(hash);
-  setHits(dict?.dictHits[morphemeIdx] || []);
+async function clickMorpheme(lineHash: string, lineNumber: number, morphemeIndex: number, documentName: string,
+                             setHits: SetState<PopupProps['hits']>,
+                             setLocation: SetState<Location|undefined>): Promise<void> {
+  const dict = await getHash(lineHash);
+  setHits(dict?.dictHits[morphemeIndex] || []);
+  setLocation({docName: documentName, morphemeIdx: morphemeIndex, lineHash, lineNumber});
 }
 
 type SetState<T> = React.Dispatch<React.SetStateAction<T>>;
 
-function renderLightweight(line: LightData[0], setHits: SetState<PopupProps['hits']>) {
+function renderLightweight(line: LightData[0], lineNumber: number, documentName: string,
+                           setHits: SetState<PopupProps['hits']>, setLocation: SetState<Location|undefined>) {
   if (typeof line === 'string') { return line; }
   return ce(
       'line', {is: 'span', id: 'hash-' + line.hash},
       ...line.furigana.map(
           (f, fidx) =>
               typeof f === 'string'
-                  ? ce('morpheme', {onClick: e => clickMorpheme(line.hash, fidx, setHits), is: 'span'}, f)
-                  : ce('morpheme', {onClick: e => clickMorpheme(line.hash, fidx, setHits), is: 'span'},
+                  ? ce('morpheme', {
+                      onClick: e => clickMorpheme(line.hash, lineNumber, fidx, documentName, setHits, setLocation),
+                      is: 'span'
+                    },
+                       f)
+                  : ce('morpheme', {
+                      onClick: e => clickMorpheme(line.hash, lineNumber, fidx, documentName, setHits, setLocation),
+                      is: 'span'
+                    },
                        ...f.map(r => typeof r === 'string' ? r : ce('ruby', null, r.ruby, ce('rt', null, r.rt))))));
 }
 
@@ -140,6 +151,7 @@ function Popup({
 }: PopupProps) {
   const docName = Recoil.useRecoilValue(docNameSelector);
   const setAtom = Recoil.useSetRecoilState(docAtom);
+  const location = Recoil.useRecoilValue(locationAtom);
 
   // set that we populate from Pouchdb when
   // (1) *hits* changes (we clicked a morpheme) or
@@ -151,18 +163,23 @@ function Popup({
   // this effect will build `subdb` by looping over Pouchdb `bulkGet`
   useEffect(() => {
     (async function() {
+      if (!location) { return; }
       const results: PouchDB.Core.BulkGetResponse<AnnotatedWordIdDoc> =
           await db.bulkGet({docs: hits.flatMap(v => v.flatMap(h => ({id: wordIdToKey(docName, h.wordId)})))});
       const newSubdb: typeof subdb = new Set();
       results.results.forEach(({docs, id}) => docs.forEach(doc => {
-        if ('ok' in doc && doc.ok.include) { newSubdb.add(id); }
+        if ('ok' in doc &&
+            doc.ok.locations?.[location.docName]?.[location.lineHash]?.morphemeIdxs[location.morphemeIdx]) {
+          newSubdb.add(id);
+        }
       }));
       setSubdb(newSubdb);
     })();
-  }, [hits, counter]); // the final array ensures we only run this when either element changes, otherwise, infinite loop
+  }, [hits, counter, location]);
+  // the final array ensures we only run this when an element changes, otherwise, infinite loop
 
   // The popup itself.
-  if (hidden) { return ce('div', null); }
+  if (hidden || !location) { return ce('div', null); }
 
   const closeButton = ce('button', {onClick: e => setHidden(true)}, 'X');
   return ce(
@@ -187,7 +204,7 @@ function Popup({
                               ce(
                                   'button',
                                   {
-                                    onClick: () => toggleWordIdAnnotation(hit, docName).then(({updated}) => {
+                                    onClick: () => toggleWordIdAnnotation(hit, location).then(({updated}) => {
                                       if (updated) { setCounter(counter + 1); }
                                       getFlashcards(docName).then(flashcards => setAtom(old => ({...old, flashcards})));
                                     })
@@ -209,16 +226,31 @@ function highlight(needle: IScoreHit['run'], haystack: string) {
 }
 function wordIdToKey(documentName: string, wordId: string) { return `doc-${documentName}/annotated-wordId-${wordId}`; }
 interface AnnotatedWordIdDoc {
-  include: boolean;
   wordId: string;
   summary: string;
-  timestamp: number;
+  locations:
+      {[docName: string]: {[lineHash: string]: {lineNumber: number, morphemeIdxs: {[morphemeIdx: number]: number}}}},
 }
-async function toggleWordIdAnnotation({wordId, summary}: IScoreHit, docName: string) {
+async function toggleWordIdAnnotation({wordId, summary}: IScoreHit,
+                                      {docName: documentName, lineHash, lineNumber, morphemeIdx}: Location) {
   const timestamp = Date.now();
-  const x =
-      await db.upsert(wordIdToKey(docName, wordId), (doc: Partial<AnnotatedWordIdDoc>) =>
-                                                        ({...doc, include: !doc.include, wordId, summary, timestamp}));
+  const x = await db.upsert(wordIdToKey(documentName, wordId), (doc: Partial<AnnotatedWordIdDoc>) => {
+    doc.summary = summary;
+    const top = {[documentName]: {[lineHash]: {lineNumber: lineNumber, morphemeIdxs: {[morphemeIdx]: timestamp}}}};
+    if (!doc.locations) {
+      doc.locations = top;
+    } else if (!doc.locations[documentName]) {
+      doc.locations[documentName] = top[documentName];
+    } else if (!doc.locations[documentName][lineHash]) {
+      doc.locations[documentName][lineHash] = top[documentName][lineHash];
+    } else if (!doc.locations[documentName][lineHash].morphemeIdxs[morphemeIdx]) {
+      doc.locations[documentName][lineHash].morphemeIdxs[morphemeIdx] =
+          top[documentName][lineHash].morphemeIdxs[morphemeIdx];
+    } else {
+      delete doc.locations[documentName][lineHash].morphemeIdxs[morphemeIdx];
+    }
+    return doc as AnnotatedWordIdDoc;
+  });
   return x;
 }
 
@@ -228,12 +260,21 @@ function ListFlashcards({}: ListFlashcardsProps) {
   return ce('div', null, ce('ol', null, ...(flashcards || []).map(dict => ce('li', null, dict.summary))));
 }
 
-async function getFlashcards(documentName: string) {
-  const startkey = wordIdToKey(documentName, '');
+async function getFlashcards(docName: string) {
+  const startkey = wordIdToKey(docName, '');
   const res = await db.allDocs<AnnotatedWordIdDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
   const docs = res.rows.map(row => row.doc);
-  const okDocs: AnnotatedWordIdDoc[] = docs.filter(x => !!x && x.include) as NonNullable<typeof docs[0]>[];
-  okDocs.sort((a, b) => a.timestamp - b.timestamp);
+  const okDocs: AnnotatedWordIdDoc[] = docs.filter(x => !!x && x.locations[docName]) as NonNullable<typeof docs[0]>[];
+  // this will become slow if a wordId is tagged a lot in a document, needlessly linear
+  const earliestLine = (d: AnnotatedWordIdDoc) =>
+      Math.min(...Object.values(d.locations[docName]).map(o => o.lineNumber));
+  const earliestMorpheme = (d: AnnotatedWordIdDoc) => Math.min(
+      ...Object.values(d.locations[docName]).map(o => Math.min(...Object.keys(o.morphemeIdxs).map(o => parseInt(o)))));
+  okDocs.sort((a, b) => {
+    const ea = earliestLine(a);
+    const eb = earliestLine(b);
+    return ea === eb ? earliestMorpheme(a) - earliestMorpheme(b) : ea - eb
+  });
   return okDocs;
 }
 
@@ -241,12 +282,20 @@ const docAtom = Recoil.atom(
     {key: 'allFlashcards', default: {documentName: '', flashcards: undefined as undefined | AnnotatedWordIdDoc[]}});
 const docNameSelector = Recoil.selector({key: 'docName', get: ({get}) => get(docAtom).documentName});
 const flashcardsSelector = Recoil.selector({key: 'flashcards', get: ({get}) => get(docAtom).flashcards});
+interface Location {
+  docName: string;
+  lineHash: string;
+  lineNumber: number;
+  morphemeIdx: number;
+}
+const locationAtom = Recoil.atom({key: 'location', default: undefined as undefined | Location})
 
 export interface DocProps {
   data: LightData|undefined, documentName: string,
 }
 export function Doc({data, documentName}: DocProps) {
   const [atom, setAtom] = Recoil.useRecoilState(docAtom);
+  const setLocation = Recoil.useSetRecoilState(locationAtom);
 
   const [hits, setHits] = useState([] as PopupProps['hits']);
   const [hiddenPopup, setHiddenPopup] = useState(true);
@@ -260,5 +309,6 @@ export function Doc({data, documentName}: DocProps) {
     setHits(x);
   };
   return ce('div', null, ce(ListFlashcards), ce(Popup, {hits, hidden: hiddenPopup, setHidden: setHiddenPopup}),
-            ...data.map(o => ce('p', {className: 'large-content'}, renderLightweight(o, setHitsOpenPopup))));
+            ...data.map((o, lino) => ce('p', {className: 'large-content'},
+                                        renderLightweight(o, lino, documentName, setHitsOpenPopup, setLocation))));
 }
