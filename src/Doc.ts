@@ -249,7 +249,7 @@ async function toggleWordIdAnnotation({wordId, summary}: IScoreHit,
     } else {
       delete doc.locations[documentName][lineHash].morphemeIdxs[morphemeIdx];
     }
-    return doc as AnnotatedWordIdDoc;
+    return {...doc, summary, wordId, locations: doc.locations};
   });
   return x;
 }
