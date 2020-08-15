@@ -5,6 +5,7 @@ import PR from 'io-ts/lib/PathReporter';
 import PouchDB from 'pouchdb-browser';
 import PouchUpsert from 'pouchdb-upsert';
 import React, {createElement as ce, useEffect, useState} from 'react';
+import Recoil from 'recoil';
 
 PouchDB.plugin(PouchUpsert);
 const db = new PouchDB('sidecar');
@@ -87,10 +88,6 @@ Accept dictionary hits
 Accept changes in reading & mass-apply them & apply them for future occurrences in this doc
 */
 
-export interface DocProps {
-  data: LightData|undefined
-}
-
 const HASH_TO_DICT: Map<string, IDict> = new Map();
 async function getHash(hash: string): Promise<IDict|undefined> {
   const hit = HASH_TO_DICT.get(hash);
@@ -135,15 +132,14 @@ interface PopupProps {
   hits: IScoreHit[][];
   hidden: boolean;
   setHidden: SetState<boolean>;
-  fetchAllFlashcards: () => Promise<void>;
 }
 function Popup({
   hits,
   hidden,
   setHidden,
-  fetchAllFlashcards,
 }: PopupProps) {
-  if (hidden) { return ce('div', null); }
+  const docName = Recoil.useRecoilValue(docNameSelector);
+  const setAtom = Recoil.useSetRecoilState(docAtom);
 
   // set that we populate from Pouchdb when
   // (1) *hits* changes (we clicked a morpheme) or
@@ -156,7 +152,7 @@ function Popup({
   useEffect(() => {
     (async function() {
       const results: PouchDB.Core.BulkGetResponse<AnnotatedWordIdDoc> =
-          await db.bulkGet({docs: hits.flatMap(v => v.flatMap(h => ({id: wordIdToKey(h.wordId)})))});
+          await db.bulkGet({docs: hits.flatMap(v => v.flatMap(h => ({id: wordIdToKey(docName, h.wordId)})))});
       const newSubdb: typeof subdb = new Set();
       results.results.forEach(({docs, id}) => docs.forEach(doc => {
         if ('ok' in doc && doc.ok.include) { newSubdb.add(id); }
@@ -166,6 +162,8 @@ function Popup({
   }, [hits, counter]); // the final array ensures we only run this when either element changes, otherwise, infinite loop
 
   // The popup itself.
+  if (hidden) { return ce('div', null); }
+
   const closeButton = ce('button', {onClick: e => setHidden(true)}, 'X');
   return ce(
       'div',
@@ -189,11 +187,12 @@ function Popup({
                               ce(
                                   'button',
                                   {
-                                    onClick: () => toggleWordIdAnnotation(hit, fetchAllFlashcards).then(({updated}) => {
+                                    onClick: () => toggleWordIdAnnotation(hit, docName).then(({updated}) => {
                                       if (updated) { setCounter(counter + 1); }
+                                      getFlashcards(docName).then(flashcards => setAtom(old => ({...old, flashcards})));
                                     })
                                   },
-                                  subdb.has(wordIdToKey(hit.wordId)) ? 'Flashcard!' : 'Not a flashcard',
+                                  subdb.has(wordIdToKey(docName, hit.wordId)) ? 'Flashcard!' : 'Not a flashcard',
                                   ),
                               ),
                           ),
@@ -208,44 +207,51 @@ function highlight(needle: IScoreHit['run'], haystack: string) {
   return haystack.split('').map(c => needleChars.has(c) ? ce('span', {className: 'highlight-popup'}, c)
                                                         : ce('span', null, c));
 }
-function wordIdToKey(wordId: string) { return `annotated-wordId-${wordId}`; }
+function wordIdToKey(documentName: string, wordId: string) { return `doc-${documentName}/annotated-wordId-${wordId}`; }
 interface AnnotatedWordIdDoc {
   include: boolean;
   wordId: string;
   summary: string;
   timestamp: number;
 }
-async function toggleWordIdAnnotation({wordId, summary}: IScoreHit,
-                                      fetchAllFlashcards: PopupProps['fetchAllFlashcards']) {
+async function toggleWordIdAnnotation({wordId, summary}: IScoreHit, docName: string) {
   const timestamp = Date.now();
-  const x = await db.upsert(wordIdToKey(wordId), (doc: Partial<AnnotatedWordIdDoc>) =>
-                                                     ({...doc, include: !doc.include, wordId, summary, timestamp}));
-  fetchAllFlashcards(); // no await here, we don't care when this finishes
+  const x =
+      await db.upsert(wordIdToKey(docName, wordId), (doc: Partial<AnnotatedWordIdDoc>) =>
+                                                        ({...doc, include: !doc.include, wordId, summary, timestamp}));
   return x;
 }
 
-interface ListFlashcardsProps {
-  flashcards: AnnotatedWordIdDoc[]|undefined;
-}
-function ListFlashcards({flashcards}: ListFlashcardsProps) {
+interface ListFlashcardsProps {}
+function ListFlashcards({}: ListFlashcardsProps) {
+  const {flashcards} = Recoil.useRecoilValue(docAtom);
   return ce('div', null, ce('ol', null, ...(flashcards || []).map(dict => ce('li', null, dict.summary))));
 }
 
-export function Doc({data}: DocProps) {
+async function getFlashcards(documentName: string) {
+  const startkey = wordIdToKey(documentName, '');
+  const res = await db.allDocs<AnnotatedWordIdDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
+  const docs = res.rows.map(row => row.doc);
+  const okDocs: AnnotatedWordIdDoc[] = docs.filter(x => !!x && x.include) as NonNullable<typeof docs[0]>[];
+  okDocs.sort((a, b) => a.timestamp - b.timestamp);
+  return okDocs;
+}
+
+const docAtom = Recoil.atom(
+    {key: 'allFlashcards', default: {documentName: '', flashcards: undefined as undefined | AnnotatedWordIdDoc[]}});
+const docNameSelector = Recoil.selector({key: 'docName', get: ({get}) => get(docAtom).documentName});
+const flashcardsSelector = Recoil.selector({key: 'flashcards', get: ({get}) => get(docAtom).flashcards});
+
+export interface DocProps {
+  data: LightData|undefined, documentName: string,
+}
+export function Doc({data, documentName}: DocProps) {
+  const [atom, setAtom] = Recoil.useRecoilState(docAtom);
+
   const [hits, setHits] = useState([] as PopupProps['hits']);
   const [hiddenPopup, setHiddenPopup] = useState(true);
-  const [flashcards, setFlashcards] = useState(undefined as AnnotatedWordIdDoc[] | undefined);
-  const fetchAllFlashcards = (async function() {
-    const startkey = wordIdToKey('');
-    const res = await db.allDocs<AnnotatedWordIdDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
-    const docs = res.rows.map(row => row.doc);
-    const okDocs = docs.filter(x => !!x && x.include) as NonNullable<typeof docs[0]>[];
-    okDocs.sort((a, b) => a.timestamp - b.timestamp);
-    setFlashcards(okDocs);
-  });
-  useEffect(() => {
-    if (flashcards === undefined) { fetchAllFlashcards(); }
-  }, [flashcards === undefined]);
+  useEffect(() => { getFlashcards(documentName).then(flashcards => setAtom({documentName, flashcards})); },
+            [atom.documentName === documentName]);
 
   if (!data) { return ce('p', null, ''); }
 
@@ -253,7 +259,6 @@ export function Doc({data}: DocProps) {
     setHiddenPopup(false);
     setHits(x);
   };
-  return ce('div', null, ce(ListFlashcards, {flashcards}),
-            ce(Popup, {hits, hidden: hiddenPopup, setHidden: setHiddenPopup, fetchAllFlashcards}),
+  return ce('div', null, ce(ListFlashcards), ce(Popup, {hits, hidden: hiddenPopup, setHidden: setHiddenPopup}),
             ...data.map(o => ce('p', {className: 'large-content'}, renderLightweight(o, setHitsOpenPopup))));
 }
