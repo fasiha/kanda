@@ -154,7 +154,7 @@ const overridesSelector = Recoil.selectorFamily(
     {key: 'docToFuriganaOverrides', get: (lineHash: string) => ({get}) => get(docAtom).furiganaOverrides[lineHash]});
 
 const hitsAtom = Recoil.atom({key: 'hits', default: [] as IScoreHit[][]});
-const popupHiddenAtom = Recoil.atom({key: 'popupHidden', default: false});
+const popupHiddenAtom = Recoil.atom({key: 'popupHidden', default: true});
 
 /*
 
@@ -167,8 +167,6 @@ export interface DocProps {
 }
 export function Doc({data, documentName}: DocProps) {
   const setDoc = Recoil.useSetRecoilState(docAtom);
-  const [hiddenPopup, setHiddenPopup] = Recoil.useRecoilState(popupHiddenAtom);
-
   useEffect(() => {
     Promise.all([getFlashcards(documentName), getFuriganaOverrides(documentName)])
         .then(([flashcards, furiganaOverrides]) => setDoc({documentName, flashcards, furiganaOverrides}));
@@ -180,16 +178,21 @@ export function Doc({data, documentName}: DocProps) {
       'div',
       null,
       ce(ListFlashcards),
-      hiddenPopup ? ''
-                  : ce(
-                        'div',
-                        {className: 'popup'},
-                        ce('button', {onClick: () => setHiddenPopup(!hiddenPopup)}, 'X'),
-                        ce(Popup),
-                        ce(EditFurigana),
-                        ),
+      ce(PopupContents),
       ...data.map((line, lineNumber) =>
                       ce('p', {className: 'large-content'}, ce(LightLine, ({line, lineNumber, documentName})))),
+  );
+}
+
+function PopupContents() {
+  const [hiddenPopup, setHiddenPopup] = Recoil.useRecoilState(popupHiddenAtom);
+  if (hiddenPopup) { return ce('p', null); }
+  return ce(
+      'div',
+      {className: 'popup'},
+      ce('button', {onClick: () => setHiddenPopup(!hiddenPopup)}, 'X'),
+      ce(Popup),
+      ce(EditFurigana),
   );
 }
 
@@ -236,7 +239,7 @@ async function clickMorpheme(lineHash: string, lineNumber: number, morphemeIndex
   const dict = await getHash(lineHash);
   setHits(dict?.dictHits[morphemeIndex] || []);
   setLocation({docName: documentName, morphemeIdx: morphemeIndex, lineHash, lineNumber, furigana});
-  // setHiddenPopup(false);
+  setHiddenPopup(false);
 }
 
 /*
