@@ -30,6 +30,7 @@ const ScoreHit = t.type({
   score: t.union([t.number, t.null]), // I hate it but JavaScript codec sends Infinity->null
   search: t.string,
   run: t.union([t.string, Cloze]),
+  runIdx: t.tuple([t.number, t.number]),
   summary: t.string,
 });
 const Furigana = t.union([t.string, t.type({ruby: t.string, rt: t.string})]);
@@ -120,11 +121,22 @@ type FuriganaOverridesDoc = {
   lineHash: string,
   overrides: {[morphemeIdx: number]: ILightLine['furigana'][0]}
 };
+interface FlashcardDoc {
+  wordId: string;
+  summary: string;
+  locations: {
+    [docName: string]: {
+      [lineHash: string]:
+          {lineNumber: number, morphemeIdxs: {[morphemeIdx: number]: {timestamp: number, runIdx: [number, number]}}}
+    }
+  };
+}
 
 // Without the Partials below, indexing into this array is typed as safe when it's not
 // semi-related https://github.com/Microsoft/TypeScript/issues/11122
 type FuriganaOverrides = Partial<{[hash: string]: Partial<{[morphemeIdx: number]: ILightLine['furigana'][0]}>;}>;
-type Flashcards = Partial<{[hash: string]: Partial<{[morphemeIdx: number]: {wordId: string, summary: string}[]}>;}>;
+type Flashcards = Partial<
+    {[hash: string]: Partial<{[morphemeIdx: number]: {wordId: string, summary: string, runIdx: [number, number]}[]}>;}>;
 
 /*
 
@@ -148,9 +160,11 @@ const flashcardsMapSelector = Recoil.selector({
     const docName = get(docNameSelector);
     const ret: Flashcards = {};
     for (const doc of flashcards) {
-      const toAdd = {wordId: doc.wordId, summary: doc.summary};
+      const toAddBase = {wordId: doc.wordId, summary: doc.summary};
       for (const [lineHash, {morphemeIdxs}] of Object.entries(doc.locations[docName])) {
         for (const morphemeIdx of Object.keys(morphemeIdxs)) {
+          const specific = doc.locations[docName][lineHash].morphemeIdxs[morphemeIdx as any];
+          const toAdd = {...toAddBase, ...specific};
           if (!ret[lineHash]) {
             ret[lineHash] = {[morphemeIdx]: [toAdd]};
           } else if (!ret[lineHash]?.[morphemeIdx as any]) {
@@ -164,15 +178,22 @@ const flashcardsMapSelector = Recoil.selector({
     return ret;
   }
 });
-const flashcardsForLineSelector = Recoil.selectorFamily(
-    {key: 'flashcardsForLine', get: (lineHash: string) => ({get}) => get(flashcardsMapSelector)[lineHash]});
-
-interface FlashcardDoc {
-  wordId: string;
-  summary: string;
-  locations:
-      {[docName: string]: {[lineHash: string]: {lineNumber: number, morphemeIdxs: {[morphemeIdx: number]: number}}}};
-}
+const flashcardsForLineSelector = Recoil.selectorFamily({
+  key: 'flashcardsForLine',
+  get: (lineHash: string) => ({get}) => {
+    const flashcards = {...(get(flashcardsMapSelector)[lineHash] || {})};
+    for (const morphemeIdxStr of Object.keys(flashcards)) {
+      const morphemeIdx = parseInt(morphemeIdxStr);
+      const res = flashcards[morphemeIdx] || []; // ||[] is typescript pacification
+      const runLength = Math.max(...res.map(o => o.runIdx[1] - o.runIdx[0] + 1));
+      for (let i = 0; i < runLength; i++) {
+        if (!((i + morphemeIdx) in flashcards)) { flashcards[i + morphemeIdx] = []; }
+      }
+      // we just need this key to exist, to indicate this dictionary hit covers multiple morphemes
+    };
+    return flashcards;
+  }
+});
 
 interface Location {
   docName: string;
@@ -207,6 +228,24 @@ export function Doc({data, documentName}: DocProps) {
 
   if (!data) { return ce('p', null, ''); }
 
+  const exporter = ce(
+      'button',
+      {
+        onClick: () => (async function() {
+          const all = await db.allDocs({include_docs: true});
+          console.log(all)
+          // https://stackoverflow.com/a/44661948
+          const file = new Blob([JSON.stringify(all)], {type: 'application/json'});
+          const element = document.createElement("a");
+          element.href = URL.createObjectURL(file);
+          element.download = 'pouchdb_sidecar.json';
+          document.body.appendChild(element);
+          element.click();
+        })()
+      },
+      'Export',
+  );
+
   return ce(
       'div',
       null,
@@ -214,6 +253,7 @@ export function Doc({data, documentName}: DocProps) {
       ce(PopupContents),
       ...data.map((line, lineNumber) =>
                       ce('p', {className: 'large-content'}, ce(LightLine, ({line, lineNumber, documentName})))),
+      exporter,
   );
 }
 
@@ -248,27 +288,25 @@ function LightLine({line, lineNumber, documentName}: LineProps) {
   const overrides = Recoil.useRecoilValue(overridesSelector(typeof line === 'string' ? '' : line.hash)) || {};
   if (typeof line === 'string') { return ce('span', null, line); }
   const furigana = line.furigana.map((f, i) => (i in overrides ? overrides[i] : f) as typeof line.furigana[0]);
-  return ce(
-      'line', {is: 'span', id: 'hash-' + line.hash},
-      ...furigana.map(
-          (f, fidx) =>
-              typeof f === 'string'
-                  ? ce('span', {
-                      className: fidx in flashcards ? 'flashcard-available' : undefined,
-                      onClick: e => clickMorpheme(line.hash, lineNumber, fidx, documentName, f, setHits, setLocation,
-                                                  setHiddenPopup)
-                    },
-                       f)
-                  : ce('span', {
-                      onClick: e => clickMorpheme(line.hash, lineNumber, fidx, documentName, f, setHits, setLocation,
-                                                  setHiddenPopup),
-                      className: [
-                        (fidx in overrides ? 'furigana-override' : ''),
-                        (fidx in flashcards ? 'flashcard-available' : '')
-                      ].filter(x => !!x).join(' ') ||
-                                     undefined
-                    },
-                       ...f.map(r => typeof r === 'string' ? r : ce('ruby', null, r.ruby, ce('rt', null, r.rt))))));
+  const contents = furigana.map(
+      (f, fidx) =>
+          typeof f === 'string'
+              ? ce('span', {
+                  className: fidx in flashcards ? 'flashcard-available' : undefined,
+                  onClick: e =>
+                      clickMorpheme(line.hash, lineNumber, fidx, documentName, f, setHits, setLocation, setHiddenPopup)
+                },
+                   f)
+              : ce('span', {
+                  onClick: e =>
+                      clickMorpheme(line.hash, lineNumber, fidx, documentName, f, setHits, setLocation, setHiddenPopup),
+                  className: [
+                    (fidx in overrides ? 'furigana-override' : ''), (fidx in flashcards ? 'flashcard-available' : '')
+                  ].filter(x => !!x).join(' ') ||
+                                 undefined
+                },
+                   ...f.map(r => typeof r === 'string' ? r : ce('ruby', null, r.ruby, ce('rt', null, r.rt)))));
+  return ce('line', {is: 'span', id: 'hash-' + line.hash}, ...contents);
 }
 
 async function clickMorpheme(lineHash: string, lineNumber: number, morphemeIndex: number, documentName: string,
@@ -360,6 +398,7 @@ List of all flashcards
 interface ListFlashcardsProps {}
 function ListFlashcards({}: ListFlashcardsProps) {
   const flashcards = Recoil.useRecoilValue(flashcardsSelector);
+  if (flashcards.length === 0) { return ce('span'); }
   return ce('div', {className: 'list-of-flashcards'},
             ce('ol', null, ...flashcards.map(dict => ce('li', null, dict.summary))));
 }
@@ -477,12 +516,13 @@ function highlight(needle: IScoreHit['run'], haystack: string) {
 }
 function wordIdToKey(documentName: string, wordId: string) { return `doc-${documentName}/annotated-wordId-${wordId}`; }
 // todo: rename toggleWordIdAnnotation=>addLocationToFlashcard
-async function toggleWordIdAnnotation({wordId, summary}: IScoreHit,
+async function toggleWordIdAnnotation({wordId, summary, runIdx}: IScoreHit,
                                       {docName: documentName, lineHash, lineNumber, morphemeIdx}: Location) {
   const timestamp = Date.now();
   const x = await db.upsert(wordIdToKey(documentName, wordId), (doc: Partial<FlashcardDoc>) => {
     doc.summary = summary;
-    const top = {[documentName]: {[lineHash]: {lineNumber: lineNumber, morphemeIdxs: {[morphemeIdx]: timestamp}}}};
+    const top: FlashcardDoc['locations'] =
+        {[documentName]: {[lineHash]: {lineNumber: lineNumber, morphemeIdxs: {[morphemeIdx]: {timestamp, runIdx}}}}};
     if (!doc.locations) {
       doc.locations = top;
     } else if (!doc.locations[documentName]) {
