@@ -150,13 +150,9 @@ function LightLine({line, lineNumber, documentName, setHits, setLocation}: LineP
 
 interface PopupProps {
   hits: IScoreHit[][];
-  hidden: boolean;
-  setHidden: SetState<boolean>;
 }
 function Popup({
   hits,
-  hidden,
-  setHidden,
 }: PopupProps) {
   const docName = Recoil.useRecoilValue(docNameSelector);
   const setAtom = Recoil.useSetRecoilState(docAtom);
@@ -187,14 +183,11 @@ function Popup({
   }, [hits, counter, location]);
   // the final array ensures we only run this when an element changes, otherwise, infinite loop
 
-  // The popup itself.
-  if (hidden || !location) { return ce('div', null); }
+  if (!location) { return ce('p', null); }
 
-  const closeButton = ce('button', {onClick: e => setHidden(true)}, 'X');
   return ce(
       'div',
-      {id: "dict-popup"},
-      closeButton,
+      null,
       ce(
           'ul',
           null,
@@ -408,8 +401,14 @@ export function Doc({data, documentName}: DocProps) {
       'div',
       null,
       ce(ListFlashcards),
-      ce(EditFurigana),
-      ce(Popup, {hits, hidden: hiddenPopup, setHidden: setHiddenPopup}),
+      hiddenPopup ? ''
+                  : ce(
+                        'div',
+                        {className: 'popup'},
+                        ce('button', {onClick: () => setHiddenPopup(!hiddenPopup)}, 'X'),
+                        ce(Popup, {hits}),
+                        ce(EditFurigana),
+                        ),
       ...data.map((line, lineNumber) =>
                       ce('p', {className: 'large-content'},
                          ce(LightLine, ({line, lineNumber, documentName, setHits: setHitsOpenPopup, setLocation})))),
