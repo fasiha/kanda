@@ -320,31 +320,27 @@ function EditFurigana() {
             e => { setChoices(choices.map((old, oldidx) => oldidx === i ? {ruby: o.ruby, rt: e.target.value} : old)); }
       }));
 
-  const commit = ce('button', {
-    onClick: () => {
-      // write to pouchdb
-      // write to docAtom
-      (async function() {
-        db.upsert(
-            lineHashToFuriganaOverridesKey(location.docName, location.lineHash),
-            (doc: Partial<FuriganaOverridesDoc>) => {
-              const overrides = doc.overrides || {};
-              const rebuiltFurigana = location.furigana.slice();
-              for (let i = 0, j = 0; i < rebuiltFurigana.length; i++) {
-                if (typeof rebuiltFurigana[i] !== 'string') { rebuiltFurigana[i] = choices[j++]; }
-              }
-              overrides[location.morphemeIdx] = rebuiltFurigana;
-              // console.log({overrides, final: {...doc, lineHash: location.lineHash, overrides}})
+  const upsert = (deleteFlag: boolean) => {
+    db.upsert(
+        lineHashToFuriganaOverridesKey(location.docName, location.lineHash), (doc: Partial<FuriganaOverridesDoc>) => {
+          const overrides = doc.overrides || {};
+          if (deleteFlag) {
+            delete overrides[location.morphemeIdx];
+          } else {
+            const rebuiltFurigana = location.furigana.slice();
+            for (let i = 0, j = 0; i < rebuiltFurigana.length; i++) {
+              if (typeof rebuiltFurigana[i] !== 'string') { rebuiltFurigana[i] = choices[j++]; }
+            }
+            overrides[location.morphemeIdx] = rebuiltFurigana;
+          }
+          // write to Recoil also
+          setAtom(doc => ({...doc, furiganaOverrides: {...doc.furiganaOverrides, [location.lineHash]: overrides}}));
+          return {...doc, lineHash: location.lineHash, overrides};
+        });
+  };
 
-              // write to Recoil also
-              setAtom(doc => ({...doc, furiganaOverrides: {...doc.furiganaOverrides, [location.lineHash]: overrides}}));
-
-              return {...doc, lineHash: location.lineHash, overrides};
-            });
-      })();
-    }
-  },
-                    'Save');
+  const commit = ce('button', {onClick: () => upsert(false)}, 'Save');
+  const remove = ce('button', {onClick: () => upsert(true)}, 'Remove');
 
   return ce(
       'div',
@@ -352,6 +348,7 @@ function EditFurigana() {
       'edit furigana: ',
       ce('ul', null, ...choices.map((o, i) => ce('li', null, o.ruby, inputs[i]))),
       commit,
+      remove,
   );
 }
 
