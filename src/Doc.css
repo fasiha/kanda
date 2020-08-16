@@ -21,6 +21,10 @@
   color:  #C0FA18;
 }
 
+.flashcard-available {
+  background-color: #7E69BD;
+}
+
 .list-of-flashcards {
   max-height: 10em;
   overflow-y: scroll;

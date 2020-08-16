@@ -124,6 +124,7 @@ type FuriganaOverridesDoc = {
 // Without the Partials below, indexing into this array is typed as safe when it's not
 // semi-related https://github.com/Microsoft/TypeScript/issues/11122
 type FuriganaOverrides = Partial<{[hash: string]: Partial<{[morphemeIdx: number]: ILightLine['furigana'][0]}>;}>;
+type Flashcards = Partial<{[hash: string]: Partial<{[morphemeIdx: number]: {wordId: string, summary: string}[]}>;}>;
 
 /*
 
@@ -134,18 +135,43 @@ const docAtom = Recoil.atom({
   key: 'docData',
   default: {
     documentName: '',
-    flashcards: undefined as undefined | FlashcardDoc[],
+    flashcards: [] as FlashcardDoc[],
     furiganaOverrides: {} as FuriganaOverrides,
   }
 });
 const docNameSelector = Recoil.selector({key: 'docName', get: ({get}) => get(docAtom).documentName});
 const flashcardsSelector = Recoil.selector({key: 'flashcards', get: ({get}) => get(docAtom).flashcards});
+const flashcardsMapSelector = Recoil.selector({
+  key: 'flashcardsMap',
+  get: ({get}) => {
+    const flashcards = get(flashcardsSelector);
+    const docName = get(docNameSelector);
+    const ret: Flashcards = {};
+    for (const doc of flashcards) {
+      const toAdd = {wordId: doc.wordId, summary: doc.summary};
+      for (const [lineHash, {morphemeIdxs}] of Object.entries(doc.locations[docName])) {
+        for (const morphemeIdx of Object.keys(morphemeIdxs)) {
+          if (!ret[lineHash]) {
+            ret[lineHash] = {[morphemeIdx]: [toAdd]};
+          } else if (!ret[lineHash]?.[morphemeIdx as any]) {
+            (ret[lineHash] as NonNullable<typeof ret['']>)[morphemeIdx as any] = [toAdd];
+          } else {
+            ret[lineHash]?.[morphemeIdx as any]?.push(toAdd);
+          }
+        }
+      }
+    }
+    return ret;
+  }
+});
+const flashcardsForLineSelector = Recoil.selectorFamily(
+    {key: 'flashcardsForLine', get: (lineHash: string) => ({get}) => get(flashcardsMapSelector)[lineHash]});
 
 interface FlashcardDoc {
   wordId: string;
   summary: string;
   locations:
-      {[docName: string]: {[lineHash: string]: {lineNumber: number, morphemeIdxs: {[morphemeIdx: number]: number}}}},
+      {[docName: string]: {[lineHash: string]: {lineNumber: number, morphemeIdxs: {[morphemeIdx: number]: number}}}};
 }
 
 interface Location {
@@ -218,6 +244,7 @@ function LightLine({line, lineNumber, documentName}: LineProps) {
   const setHits = Recoil.useSetRecoilState(hitsAtom);
   const setHiddenPopup = Recoil.useSetRecoilState(popupHiddenAtom);
 
+  const flashcards = Recoil.useRecoilValue(flashcardsForLineSelector(typeof line === 'string' ? '' : line.hash)) || {};
   const overrides = Recoil.useRecoilValue(overridesSelector(typeof line === 'string' ? '' : line.hash)) || {};
   if (typeof line === 'string') { return ce('span', null, line); }
   const furigana = line.furigana.map((f, i) => (i in overrides ? overrides[i] : f) as typeof line.furigana[0]);
@@ -227,6 +254,7 @@ function LightLine({line, lineNumber, documentName}: LineProps) {
           (f, fidx) =>
               typeof f === 'string'
                   ? ce('span', {
+                      className: fidx in flashcards ? 'flashcard-available' : undefined,
                       onClick: e => clickMorpheme(line.hash, lineNumber, fidx, documentName, f, setHits, setLocation,
                                                   setHiddenPopup)
                     },
@@ -234,7 +262,11 @@ function LightLine({line, lineNumber, documentName}: LineProps) {
                   : ce('span', {
                       onClick: e => clickMorpheme(line.hash, lineNumber, fidx, documentName, f, setHits, setLocation,
                                                   setHiddenPopup),
-                      className: fidx in overrides ? 'furigana-override' : undefined
+                      className: [
+                        (fidx in overrides ? 'furigana-override' : ''),
+                        (fidx in flashcards ? 'flashcard-available' : '')
+                      ].filter(x => !!x).join(' ') ||
+                                     undefined
                     },
                        ...f.map(r => typeof r === 'string' ? r : ce('ruby', null, r.ruby, ce('rt', null, r.rt))))));
 }
@@ -328,9 +360,8 @@ List of all flashcards
 interface ListFlashcardsProps {}
 function ListFlashcards({}: ListFlashcardsProps) {
   const flashcards = Recoil.useRecoilValue(flashcardsSelector);
-  if (!flashcards) { return ce('span') }
   return ce('div', {className: 'list-of-flashcards'},
-            ce('ol', null, ...(flashcards || []).map(dict => ce('li', null, dict.summary))));
+            ce('ol', null, ...flashcards.map(dict => ce('li', null, dict.summary))));
 }
 
 async function getFlashcards(docName: string) {
@@ -445,6 +476,7 @@ function highlight(needle: IScoreHit['run'], haystack: string) {
                                                         : ce('span', null, c));
 }
 function wordIdToKey(documentName: string, wordId: string) { return `doc-${documentName}/annotated-wordId-${wordId}`; }
+// todo: rename toggleWordIdAnnotation=>addLocationToFlashcard
 async function toggleWordIdAnnotation({wordId, summary}: IScoreHit,
                                       {docName: documentName, lineHash, lineNumber, morphemeIdx}: Location) {
   const timestamp = Date.now();
