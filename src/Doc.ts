@@ -321,6 +321,7 @@ List of all flashcards
 interface ListFlashcardsProps {}
 function ListFlashcards({}: ListFlashcardsProps) {
   const flashcards = Recoil.useRecoilValue(flashcardsSelector);
+  if (!flashcards) { return ce('span') }
   return ce('div', {className: 'list-of-flashcards'},
             ce('ol', null, ...(flashcards || []).map(dict => ce('li', null, dict.summary))));
 }
