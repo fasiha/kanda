@@ -359,7 +359,8 @@ function Popup({}: PopupProps) {
   // set that we populate from Pouchdb when
   // (1) *hits* changes (we clicked a morpheme) or
   // (2) we clicked a dictionary hit to indicate it's marked as an annotation
-  const [subdb, setSubdb] = useState(new Set([]) as Set<string>);
+  const [subdb, setSubdb] =
+      useState({thisMorpheme: new Set([]) as Set<string>, thisDocument: new Map([]) as Map<string, number>});
   // this is a hack: whenever we toggle a dictionary entry's annotation status, we'll write to Pouchdb in the onClick
   // and then we want to refresh the above set. This counter will serve as a click-tracker... this might be ok but meh
   const [counter, setCounter] = useState(0);
@@ -369,14 +370,22 @@ function Popup({}: PopupProps) {
       if (!location) { return; }
       const results: PouchDB.Core.BulkGetResponse<AnnotatedWordIdDoc> =
           await db.bulkGet({docs: hits.flatMap(v => v.flatMap(h => ({id: wordIdToKey(docName, h.wordId)})))});
-      const newSubdb: typeof subdb = new Set();
+      const thisMorpheme: typeof subdb.thisMorpheme = new Set();
+      const thisDocument: typeof subdb.thisDocument = new Map();
       results.results.forEach(({docs, id}) => docs.forEach(doc => {
-        if ('ok' in doc &&
-            doc.ok.locations?.[location.docName]?.[location.lineHash]?.morphemeIdxs[location.morphemeIdx]) {
-          newSubdb.add(id);
+        if ('ok' in doc) {
+          if (doc.ok.locations?.[location.docName]?.[location.lineHash]?.morphemeIdxs[location.morphemeIdx]) {
+            thisMorpheme.add(id);
+          }
+          if (doc.ok.locations?.[location.docName]) {
+            const count = Object.values(doc.ok.locations[location.docName])
+                              .map(o => Object.keys(o.morphemeIdxs).length)
+                              .reduce((p, c) => p + c);
+            if (count) { thisDocument.set(id, count); }
+          }
         }
       }));
-      setSubdb(newSubdb);
+      setSubdb({thisMorpheme, thisDocument});
     })();
   }, [hits, counter, location]);
   // the final array ensures we only run this when an element changes, otherwise, infinite loop
@@ -397,21 +406,26 @@ function Popup({}: PopupProps) {
                       'ol',
                       null,
                       ...stops.map(
-                          hit => ce(
-                              'li',
-                              null,
-                              ...highlight(hit.run, hit.summary),
-                              ce(
-                                  'button',
-                                  {
-                                    onClick: () => toggleWordIdAnnotation(hit, location).then(({updated}) => {
-                                      if (updated) { setCounter(counter + 1); }
-                                      getFlashcards(docName).then(flashcards => setAtom(old => ({...old, flashcards})));
-                                    })
-                                  },
-                                  subdb.has(wordIdToKey(docName, hit.wordId)) ? 'Flashcard!' : 'Not a flashcard',
-                                  ),
-                              ),
+                          hit => {
+                            const key = wordIdToKey(docName, hit.wordId);
+                            const docCount = subdb.thisDocument.get(key);
+                            const buttonText =
+                                (subdb.thisMorpheme.has(key) ? 'REMOVE flashcard?' : 'Add as flashcard') +
+                                ((docCount) ? ` (${docCount} total)` : '');
+                            const button = ce('button', {
+                              onClick: () => toggleWordIdAnnotation(hit, location).then(({updated}) => {
+                                if (updated) { setCounter(counter + 1); }
+                                getFlashcards(docName).then(flashcards => setAtom(old => ({...old, flashcards})));
+                              })
+                            },
+                                              buttonText);
+                            return ce(
+                                'li',
+                                null,
+                                ...highlight(hit.run, hit.summary),
+                                button,
+                            )
+                          },
                           ),
                       ),
                   ),
