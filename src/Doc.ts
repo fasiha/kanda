@@ -47,10 +47,10 @@ const DICT_PATH = '/dict-hits-per-line';
 type IScoreHit = t.TypeOf<typeof ScoreHit>;
 type IDict = t.TypeOf<typeof Dict>;
 type DictData = (IDict|string)[];
-type LightData = t.TypeOf<typeof Lightweight>;
-type LightLine = t.TypeOf<typeof LightweightLine>;
+type ILightData = t.TypeOf<typeof Lightweight>;
+type ILightLine = t.TypeOf<typeof LightweightLine>;
 
-export async function setupLightweightJson(docFilename: string): Promise<LightData|undefined> {
+export async function setupLightweightJson(docFilename: string): Promise<ILightData|undefined> {
   const response = await fetch(DICT_PATH + '/' + docFilename);
   if (!response.ok) {
     console.error(`Failed to fetch ${docFilename}: ${response.statusText}`);
@@ -118,12 +118,12 @@ Types PouchDB and in app
 */
 type FuriganaOverridesDoc = {
   lineHash: string,
-  overrides: {[morphemeIdx: number]: LightLine['furigana'][0]}
+  overrides: {[morphemeIdx: number]: ILightLine['furigana'][0]}
 };
 
 // Without the Partials below, indexing into this array is typed as safe when it's not
 // semi-related https://github.com/Microsoft/TypeScript/issues/11122
-type FuriganaOverrides = Partial<{[hash: string]: Partial<{[morphemeIdx: number]: LightLine['furigana'][0]}>;}>;
+type FuriganaOverrides = Partial<{[hash: string]: Partial<{[morphemeIdx: number]: ILightLine['furigana'][0]}>;}>;
 
 /*
 
@@ -140,17 +140,21 @@ const docAtom = Recoil.atom({
 });
 const docNameSelector = Recoil.selector({key: 'docName', get: ({get}) => get(docAtom).documentName});
 const flashcardsSelector = Recoil.selector({key: 'flashcards', get: ({get}) => get(docAtom).flashcards});
+
 interface Location {
   docName: string;
   lineHash: string;
   lineNumber: number;
   morphemeIdx: number;
-  furigana: LightLine['furigana'][0]; // contents of the morpheme
+  furigana: ILightLine['furigana'][0]; // contents of the morpheme
 }
 const locationAtom = Recoil.atom({key: 'location', default: undefined as undefined | Location})
 const furiganaSelector = Recoil.selector({key: 'locationTofurigana', get: ({get}) => get(locationAtom)?.furigana});
 const overridesSelector = Recoil.selectorFamily(
     {key: 'docToFuriganaOverrides', get: (lineHash: string) => ({get}) => get(docAtom).furiganaOverrides[lineHash]});
+
+const hitsAtom = Recoil.atom({key: 'hits', default: [] as IScoreHit[][]});
+const popupHiddenAtom = Recoil.atom({key: 'popupHidden', default: false});
 
 /*
 
@@ -158,15 +162,13 @@ Main app
 
 */
 export interface DocProps {
-  data: LightData|undefined;
+  data: ILightData|undefined;
   documentName: string;
 }
 export function Doc({data, documentName}: DocProps) {
   const setDoc = Recoil.useSetRecoilState(docAtom);
-  const setLocation = Recoil.useSetRecoilState(locationAtom);
+  const [hiddenPopup, setHiddenPopup] = Recoil.useRecoilState(popupHiddenAtom);
 
-  const [hits, setHits] = useState([] as PopupProps['hits']);
-  const [hiddenPopup, setHiddenPopup] = useState(true);
   useEffect(() => {
     Promise.all([getFlashcards(documentName), getFuriganaOverrides(documentName)])
         .then(([flashcards, furiganaOverrides]) => setDoc({documentName, flashcards, furiganaOverrides}));
@@ -174,10 +176,6 @@ export function Doc({data, documentName}: DocProps) {
 
   if (!data) { return ce('p', null, ''); }
 
-  const setHitsOpenPopup: typeof setHits = (x) => {
-    setHiddenPopup(false);
-    setHits(x);
-  };
   return ce(
       'div',
       null,
@@ -187,12 +185,11 @@ export function Doc({data, documentName}: DocProps) {
                         'div',
                         {className: 'popup'},
                         ce('button', {onClick: () => setHiddenPopup(!hiddenPopup)}, 'X'),
-                        ce(Popup, {hits}),
+                        ce(Popup),
                         ce(EditFurigana),
                         ),
       ...data.map((line, lineNumber) =>
-                      ce('p', {className: 'large-content'},
-                         ce(LightLine, ({line, lineNumber, documentName, setHits: setHitsOpenPopup, setLocation})))),
+                      ce('p', {className: 'large-content'}, ce(LightLine, ({line, lineNumber, documentName})))),
   );
 }
 
@@ -202,13 +199,15 @@ Render each line
 
 */
 interface LineProps {
-  line: LightData[0];
+  line: ILightData[0];
   lineNumber: number;
   documentName: string;
-  setHits: SetState<PopupProps['hits']>;
-  setLocation: SetState<Location|undefined>;
 }
-function LightLine({line, lineNumber, documentName, setHits, setLocation}: LineProps) {
+function LightLine({line, lineNumber, documentName}: LineProps) {
+  const setLocation = Recoil.useSetRecoilState(locationAtom);
+  const setHits = Recoil.useSetRecoilState(hitsAtom);
+  const setHiddenPopup = Recoil.useSetRecoilState(popupHiddenAtom);
+
   const overrides = Recoil.useRecoilValue(overridesSelector(typeof line === 'string' ? '' : line.hash)) || {};
   if (typeof line === 'string') { return ce('span', null, line); }
   const furigana = line.furigana.map((f, i) => (i in overrides ? overrides[i] : f) as typeof line.furigana[0]);
@@ -218,22 +217,26 @@ function LightLine({line, lineNumber, documentName, setHits, setLocation}: LineP
           (f, fidx) =>
               typeof f === 'string'
                   ? ce('span', {
-                      onClick: e => clickMorpheme(line.hash, lineNumber, fidx, documentName, f, setHits, setLocation)
+                      onClick: e => clickMorpheme(line.hash, lineNumber, fidx, documentName, f, setHits, setLocation,
+                                                  setHiddenPopup)
                     },
                        f)
                   : ce('span', {
-                      onClick: e => clickMorpheme(line.hash, lineNumber, fidx, documentName, f, setHits, setLocation),
+                      onClick: e => clickMorpheme(line.hash, lineNumber, fidx, documentName, f, setHits, setLocation,
+                                                  setHiddenPopup),
                       className: fidx in overrides ? 'furigana-override' : undefined
                     },
                        ...f.map(r => typeof r === 'string' ? r : ce('ruby', null, r.ruby, ce('rt', null, r.rt))))));
 }
 
 async function clickMorpheme(lineHash: string, lineNumber: number, morphemeIndex: number, documentName: string,
-                             furigana: LightLine['furigana'][0], setHits: SetState<PopupProps['hits']>,
-                             setLocation: SetState<Location|undefined>): Promise<void> {
+                             furigana: ILightLine['furigana'][0], setHits: SetState<IScoreHit[][]>,
+                             setLocation: SetState<Location|undefined>,
+                             setHiddenPopup: SetState<boolean>): Promise<void> {
   const dict = await getHash(lineHash);
   setHits(dict?.dictHits[morphemeIndex] || []);
   setLocation({docName: documentName, morphemeIdx: morphemeIndex, lineHash, lineNumber, furigana});
+  // setHiddenPopup(false);
 }
 
 /*
@@ -342,15 +345,12 @@ async function getFlashcards(docName: string) {
 Dictionary hits for each morpheme run in a popup
 
 */
-interface PopupProps {
-  hits: IScoreHit[][];
-}
-function Popup({
-  hits,
-}: PopupProps) {
+interface PopupProps {}
+function Popup({}: PopupProps) {
   const docName = Recoil.useRecoilValue(docNameSelector);
   const setAtom = Recoil.useSetRecoilState(docAtom);
   const location = Recoil.useRecoilValue(locationAtom);
+  const hits = Recoil.useRecoilValue(hitsAtom);
 
   // set that we populate from Pouchdb when
   // (1) *hits* changes (we clicked a morpheme) or
