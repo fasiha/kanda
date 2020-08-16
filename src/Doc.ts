@@ -185,7 +185,7 @@ const flashcardsForLineSelector = Recoil.selectorFamily({
     for (const morphemeIdxStr of Object.keys(flashcards)) {
       const morphemeIdx = parseInt(morphemeIdxStr);
       const res = flashcards[morphemeIdx] || []; // ||[] is typescript pacification
-      const runLength = Math.max(...res.map(o => o.runIdx[1] - o.runIdx[0] + 1));
+      const runLength = Math.max(...res.map(o => o.runIdx[1] - o.runIdx[0])) + 1;
       for (let i = 0; i < runLength; i++) {
         if (!((i + morphemeIdx) in flashcards)) { flashcards[i + morphemeIdx] = []; }
       }
