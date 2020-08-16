@@ -141,6 +141,13 @@ const docAtom = Recoil.atom({
 const docNameSelector = Recoil.selector({key: 'docName', get: ({get}) => get(docAtom).documentName});
 const flashcardsSelector = Recoil.selector({key: 'flashcards', get: ({get}) => get(docAtom).flashcards});
 
+interface AnnotatedWordIdDoc {
+  wordId: string;
+  summary: string;
+  locations:
+      {[docName: string]: {[lineHash: string]: {lineNumber: number, morphemeIdxs: {[morphemeIdx: number]: number}}}},
+}
+
 interface Location {
   docName: string;
   lineHash: string;
@@ -380,7 +387,7 @@ function Popup({}: PopupProps) {
           if (doc.ok.locations?.[location.docName]) {
             const count = Object.values(doc.ok.locations[location.docName])
                               .map(o => Object.keys(o.morphemeIdxs).length)
-                              .reduce((p, c) => p + c);
+                              .reduce((p, c) => p + c, 0);
             if (count) { thisDocument.set(id, count); }
           }
         }
@@ -439,12 +446,6 @@ function highlight(needle: IScoreHit['run'], haystack: string) {
                                                         : ce('span', null, c));
 }
 function wordIdToKey(documentName: string, wordId: string) { return `doc-${documentName}/annotated-wordId-${wordId}`; }
-interface AnnotatedWordIdDoc {
-  wordId: string;
-  summary: string;
-  locations:
-      {[docName: string]: {[lineHash: string]: {lineNumber: number, morphemeIdxs: {[morphemeIdx: number]: number}}}},
-}
 async function toggleWordIdAnnotation({wordId, summary}: IScoreHit,
                                       {docName: documentName, lineHash, lineNumber, morphemeIdx}: Location) {
   const timestamp = Date.now();
