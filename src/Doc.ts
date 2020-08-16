@@ -134,14 +134,14 @@ const docAtom = Recoil.atom({
   key: 'docData',
   default: {
     documentName: '',
-    flashcards: undefined as undefined | AnnotatedWordIdDoc[],
+    flashcards: undefined as undefined | FlashcardDoc[],
     furiganaOverrides: {} as FuriganaOverrides,
   }
 });
 const docNameSelector = Recoil.selector({key: 'docName', get: ({get}) => get(docAtom).documentName});
 const flashcardsSelector = Recoil.selector({key: 'flashcards', get: ({get}) => get(docAtom).flashcards});
 
-interface AnnotatedWordIdDoc {
+interface FlashcardDoc {
   wordId: string;
   summary: string;
   locations:
@@ -335,13 +335,12 @@ function ListFlashcards({}: ListFlashcardsProps) {
 
 async function getFlashcards(docName: string) {
   const startkey = wordIdToKey(docName, '');
-  const res = await db.allDocs<AnnotatedWordIdDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
+  const res = await db.allDocs<FlashcardDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
   const docs = res.rows.map(row => row.doc);
-  const okDocs: AnnotatedWordIdDoc[] = docs.filter(x => !!x && x.locations[docName]) as NonNullable<typeof docs[0]>[];
+  const okDocs: FlashcardDoc[] = docs.filter(x => !!x && x.locations[docName]) as NonNullable<typeof docs[0]>[];
   // this will become slow if a wordId is tagged a lot in a document, needlessly linear
-  const earliestLine = (d: AnnotatedWordIdDoc) =>
-      Math.min(...Object.values(d.locations[docName]).map(o => o.lineNumber));
-  const earliestMorpheme = (d: AnnotatedWordIdDoc) => Math.min(
+  const earliestLine = (d: FlashcardDoc) => Math.min(...Object.values(d.locations[docName]).map(o => o.lineNumber));
+  const earliestMorpheme = (d: FlashcardDoc) => Math.min(
       ...Object.values(d.locations[docName]).map(o => Math.min(...Object.keys(o.morphemeIdxs).map(o => parseInt(o)))));
   okDocs.sort((a, b) => {
     const ea = earliestLine(a);
@@ -375,7 +374,7 @@ function Popup({}: PopupProps) {
   useEffect(() => {
     (async function() {
       if (!location) { return; }
-      const results: PouchDB.Core.BulkGetResponse<AnnotatedWordIdDoc> =
+      const results: PouchDB.Core.BulkGetResponse<FlashcardDoc> =
           await db.bulkGet({docs: hits.flatMap(v => v.flatMap(h => ({id: wordIdToKey(docName, h.wordId)})))});
       const thisMorpheme: typeof subdb.thisMorpheme = new Set();
       const thisDocument: typeof subdb.thisDocument = new Map();
@@ -449,7 +448,7 @@ function wordIdToKey(documentName: string, wordId: string) { return `doc-${docum
 async function toggleWordIdAnnotation({wordId, summary}: IScoreHit,
                                       {docName: documentName, lineHash, lineNumber, morphemeIdx}: Location) {
   const timestamp = Date.now();
-  const x = await db.upsert(wordIdToKey(documentName, wordId), (doc: Partial<AnnotatedWordIdDoc>) => {
+  const x = await db.upsert(wordIdToKey(documentName, wordId), (doc: Partial<FlashcardDoc>) => {
     doc.summary = summary;
     const top = {[documentName]: {[lineHash]: {lineNumber: lineNumber, morphemeIdxs: {[morphemeIdx]: timestamp}}}};
     if (!doc.locations) {
