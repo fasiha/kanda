@@ -17,6 +17,10 @@
   font-size: xx-large; /* xxx-large is unsupported in Safari as of Aug 2020 */
 }
 
+.regular-size-content {
+  font-size: medium;
+}
+
 .furigana-override {
   color:  #C0FA18;
 }

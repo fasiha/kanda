@@ -251,8 +251,7 @@ export function Doc({data, documentName}: DocProps) {
       null,
       ce(ListFlashcards),
       ce(PopupContents),
-      ...data.map((line, lineNumber) =>
-                      ce('p', {className: 'large-content'}, ce(LightLine, ({line, lineNumber, documentName})))),
+      ...data.map((line, lineNumber) => ce(LightLine, ({line, lineNumber, documentName}))),
       exporter,
   );
 }
@@ -286,7 +285,7 @@ function LightLine({line, lineNumber, documentName}: LineProps) {
 
   const flashcards = Recoil.useRecoilValue(flashcardsForLineSelector(typeof line === 'string' ? '' : line.hash)) || {};
   const overrides = Recoil.useRecoilValue(overridesSelector(typeof line === 'string' ? '' : line.hash)) || {};
-  if (typeof line === 'string') { return ce('span', null, line); }
+  if (typeof line === 'string') { return ce('p', {className: 'large-content'}, line); }
   const furigana = line.furigana.map((f, i) => (i in overrides ? overrides[i] : f) as typeof line.furigana[0]);
   const contents = furigana.map(
       (f, fidx) =>
@@ -306,7 +305,21 @@ function LightLine({line, lineNumber, documentName}: LineProps) {
                                  undefined
                 },
                    ...f.map(r => typeof r === 'string' ? r : ce('ruby', null, r.ruby, ce('rt', null, r.rt)))));
-  return ce('line', {is: 'span', id: 'hash-' + line.hash}, ...contents);
+
+  const summaries =
+      Array.from(new Set(Object.values(flashcards).filter(v => !!v).flatMap(v => v ? v.map(o => o.summary) : '')),
+                 summary => ce('li', null, summary));
+  const details = summaries.length
+                      ? ce('details', {className: 'regular-size-content'},
+                           ce('summary', null, `${summaries.length} entries`), ce('ol', null, ...summaries))
+                      : '';
+
+  return ce(
+      'div',
+      null,
+      ce('p', {className: 'large-content', id: 'hash-' + line.hash}, ...contents),
+      details,
+  );
 }
 
 async function clickMorpheme(lineHash: string, lineNumber: number, morphemeIndex: number, documentName: string,
