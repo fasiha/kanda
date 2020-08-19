@@ -10,7 +10,7 @@ type Docs = Partial<{[unique: string]: Doc}>;
 interface Doc {
   name: string;
   contents: string[];
-  raw: Partial<{[sha1: string]: RawAnalysis}>;
+  raws: (RawAnalysis|undefined)[];
 }
 interface RawAnalysis {
   sha1: string;
@@ -81,8 +81,24 @@ function DocComponent({unique}: DocProps) {
       'div',
       {className: 'doc'},
       ce('h2', null, doc.name, deleteButton),
-      ce('section', null, ...doc.contents.map(line => ce('p', null, line))),
+      ce('section', null, ...doc.raws.map((raw, i) => {
+        if (!raw) { return ce('p', null, doc.contents[i]); }
+        return ce(FuriganaComponent, {furigana: raw.furigana});
+      })),
   )
+}
+
+interface FuriganaProps {
+  furigana: Furigana[][];
+}
+function FuriganaComponent({furigana}: FuriganaProps) {
+  return ce(
+      'p',
+      null,
+      ...furigana.flatMap(
+          v =>
+              v.map(o => ce('span', null, typeof o === 'string' ? o : ce('ruby', null, o.ruby, ce('rt', null, o.rt))))),
+  );
 }
 
 interface AddDocProps {}
@@ -97,7 +113,7 @@ function AddDocComponent({}: AddDocProps) {
   const submit = ce('button', {
     onClick: async () => {
       const contents = fullText.split('\n');
-      const raw: Doc['raw'] = {};
+      const raws: Doc['raws'] = [];
       const res = await fetch(NLP_SERVER, {
         body: JSON.stringify({sentences: contents}),
         headers: {'Content-Type': 'application/json'},
@@ -105,12 +121,13 @@ function AddDocComponent({}: AddDocProps) {
       });
       if (res.ok) {
         const resData: v1ResSentence[] = await res.json();
-        for (const [i, text] of contents.entries()) {
+        for (const [i, response] of resData.entries()) {
+          const text = contents[i];
           const sha1 = await digestMessage(text, 'sha-1');
-          const {furigana, hits} = resData[i];
-          raw[sha1] = {sha1, text, hits, furigana};
+          raws.push(typeof response === 'string' ? undefined
+                                                 : {sha1, text, hits: response.hits, furigana: response.furigana})
         }
-        setDocs(docs => ({...docs, [(new Date()).toISOString()]: {name, contents, raw}}))
+        setDocs(docs => ({...docs, [(new Date()).toISOString()]: {name, contents, raws}}))
       } else {
         console.error('error parsing sentences: ' + res.statusText);
       }
@@ -120,7 +137,8 @@ function AddDocComponent({}: AddDocProps) {
   return ce('div', null, ce('h2', null, 'Create a new document'), nameInput, ce('br'), contentsInput, ce('br'), submit);
 }
 
-interface v1ResSentence {
+type v1ResSentence = string|v1ResSentenceAnalyzed;
+interface v1ResSentenceAnalyzed {
   furigana: Furigana[][];
   hits: ScoreHits[];
 }
