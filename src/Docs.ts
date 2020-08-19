@@ -53,7 +53,6 @@ React components
 interface DocsProps {}
 export function DocsComponent({}: DocsProps) {
   const docs = Recoil.useRecoilValue(docsAtom);
-  const addButton = ce('button', null, 'Add');
   return ce(
       'div',
       {id: 'all-docs'},
@@ -80,7 +79,7 @@ function DocComponent({unique}: DocProps) {
   return ce(
       'div',
       {className: 'doc'},
-      ce('h2', null, doc.name, deleteButton),
+      ce('h2', null, doc.name || unique, deleteButton),
       ce('section', null, ...doc.raws.map((raw, i) => {
         if (!raw) { return ce('p', null, doc.contents[i]); }
         return ce(FuriganaComponent, {furigana: raw.furigana});
@@ -95,9 +94,7 @@ function FuriganaComponent({furigana}: FuriganaProps) {
   return ce(
       'p',
       null,
-      ...furigana.flatMap(
-          v =>
-              v.map(o => ce('span', null, typeof o === 'string' ? o : ce('ruby', null, o.ruby, ce('rt', null, o.rt))))),
+      ...furigana.flatMap(v => v.map(o => typeof o === 'string' ? o : ce('ruby', null, o.ruby, ce('rt', null, o.rt)))),
   );
 }
 
