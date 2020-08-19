@@ -9,6 +9,7 @@ Data model
 type Docs = Partial<{[unique: string]: Doc}>;
 interface Doc {
   name: string;
+  unique: string;
   contents: string[];
   raws: (RawAnalysis|undefined)[];
 }
@@ -48,11 +49,43 @@ const docsAtom = Recoil.atom({key: 'docs', default: {} as Docs});
 const docSelector = Recoil.selectorFamily({key: 'doc', get: (unique: string) => ({get}) => get(docsAtom)[unique]});
 
 /************
+Pouchdb: what lives in the database
+************/
+import PouchDB from 'pouchdb-browser';
+import PouchUpsert from 'pouchdb-upsert';
+PouchDB.plugin(PouchUpsert);
+const db = new PouchDB('sidecar-docs');
+
+function uniqueToKey(unique: string) { return `doc-${unique}`; }
+async function getDocs(): Promise<Docs> {
+  const startkey = uniqueToKey('');
+  const res = await db.allDocs<Doc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
+  const ret: Docs = {};
+  for (const {doc} of res.rows) {
+    if (doc) {
+      const obj: Doc = {name: doc.name, unique: doc.unique, contents: doc.contents, raws: doc.raws};
+      ret[doc.unique] = obj;
+    }
+  }
+  return ret
+}
+
+/************
 React components
 ************/
 interface DocsProps {}
 export function DocsComponent({}: DocsProps) {
-  const docs = Recoil.useRecoilValue(docsAtom);
+  const [docs, setDocs] = Recoil.useRecoilState(docsAtom);
+  const [initialized, setInitialized] = useState(false);
+  useEffect(() => {
+    if (!initialized) {
+      (async () => {
+        const fromdb = await getDocs();
+        if (Object.keys(fromdb).length > 0) { setDocs(fromdb); }
+        setInitialized(true);
+      })();
+    }
+  }, [initialized]);
   return ce(
       'div',
       {id: 'all-docs'},
@@ -124,7 +157,9 @@ function AddDocComponent({}: AddDocProps) {
           raws.push(typeof response === 'string' ? undefined
                                                  : {sha1, text, hits: response.hits, furigana: response.furigana})
         }
-        setDocs(docs => ({...docs, [(new Date()).toISOString()]: {name, contents, raws}}))
+        const unique = (new Date()).toISOString();
+        const newDoc: Doc = {name, unique, contents, raws};
+        db.upsert(uniqueToKey(unique), () => newDoc).then(() => setDocs(docs => ({...docs, [unique]: newDoc})));
       } else {
         console.error('error parsing sentences: ' + res.statusText);
       }
