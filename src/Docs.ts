@@ -284,9 +284,13 @@ function HitsContainer({}: HitsProps) {
           v => ce(
               'ol', null,
               ...v.results.map(
-                  result => ce('li', null, result.summary,
+                  result => ce('li', null, ...highlight(v.run, result.summary),
                                ce('button', {onClick: () => onClick(result, v.run, rawHits.startIdx, v.endIdx)},
                                   wordIds.has(result.wordId) ? 'Entry highlighted! Remove?' : 'Create highlight?'))))));
+}
+function highlight(needle: string|ContextCloze, haystack: string) {
+  const needleChars = new Set((typeof needle === 'string' ? needle : needle.cloze).split(''));
+  return haystack.split('').map(c => needleChars.has(c) ? ce('span', {className: 'highlighted'}, c) : c);
 }
 
 /************

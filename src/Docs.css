@@ -11,4 +11,9 @@
 .right-containee {
   height: 100vh;
   overflow-y: scroll;
+  color: #A98CFD;
+}
+
+.highlighted {
+  color: white;
 }
