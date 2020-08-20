@@ -12,9 +12,17 @@ type Docs = Partial<{[unique: string]: Doc}>;
 interface Doc {
   name: string;
   unique: string;
-  contents: string[];              // each element is a line
-  raws: (RawAnalysis|undefined)[]; // each element is a line
-  // contents.length === raws.length!
+  contents: string[];                         // each element is a line
+  raws: (undefined|RawAnalysis)[];            // each element is a line (a light might be English, so undefined)
+  annotated: (AnnotatedAnalysis|undefined)[]; // each element is a line
+  // contents.length === raws.length === annotated.length!
+}
+
+interface AnnotatedAnalysis {
+  sha1: string;
+  text: string;
+  furigana: (Furigana[]|undefined)[]; // overrides for each morpheme
+  hits: AnnotatedHit[];               // hits can span morphemes, so no constraints on this length
 }
 interface RawAnalysis {
   sha1: string;
@@ -25,6 +33,14 @@ interface RawAnalysis {
 }
 
 type Furigana = string|{ruby: string, rt: string};
+interface AnnotatedHit {
+  run: string|ContextCloze;
+  startIdx: number;
+  endIdx: number;
+  wordId: string;
+  summary: string;
+}
+
 interface ScoreHits {
   startIdx: number;
   results: {
@@ -37,7 +53,7 @@ interface ScoreHit {
   wordId: string;
   score: number;
   search: string;
-  summary?: string;
+  summary: string;
 }
 interface ContextCloze {
   left: string;
@@ -51,7 +67,13 @@ Recoil: atoms & selectors
 const docsAtom = Recoil.atom({key: 'docs', default: {} as Docs});
 const docSelector = Recoil.selectorFamily({key: 'doc', get: (unique: string) => ({get}) => get(docsAtom)[unique]});
 
-const clickedHitsAtom = Recoil.atom({key: 'rawAnalysis', default: undefined as undefined | (ScoreHits)});
+interface ClickedMorpheme {
+  rawHits: ScoreHits;                       // for this morpheme
+  lineNumber: number;                       // for this line
+  annotations: AnnotatedAnalysis|undefined; // for this line
+  docUnique: string;                        // for this document
+}
+const clickedMorphemeAtom = Recoil.atom({key: 'clickedMorpheme', default: undefined as undefined | ClickedMorpheme});
 
 /************
 Pouchdb: what lives in the database
@@ -68,7 +90,8 @@ async function getDocs(): Promise<Docs> {
   const ret: Docs = {};
   for (const {doc} of res.rows) {
     if (doc) {
-      const obj: Doc = {name: doc.name, unique: doc.unique, contents: doc.contents, raws: doc.raws};
+      const obj:
+          Doc = {name: doc.name, unique: doc.unique, contents: doc.contents, raws: doc.raws, annotated: doc.annotated};
       ret[doc.unique] = obj;
     }
   }
@@ -113,7 +136,7 @@ interface DocProps {
 function DocComponent({unique}: DocProps) {
   const doc = Recoil.useRecoilValue(docSelector(unique));
   const setDocs = Recoil.useSetRecoilState(docsAtom);
-  const setClickedHits = Recoil.useSetRecoilState(clickedHitsAtom);
+  const setClickedHits = Recoil.useSetRecoilState(clickedMorphemeAtom);
   if (!doc) { return ce('span'); }
   const deleteButton = ce('button', {
     onClick: () => setDocs(docs => {
@@ -129,23 +152,28 @@ function DocComponent({unique}: DocProps) {
       ce('h2', null, doc.name || unique, deleteButton),
       ce('section', null, ...doc.raws.map((raw, i) => {
         if (!raw) { return ce('p', {onClick: () => setClickedHits(undefined)}, doc.contents[i]); }
-        return ce(FuriganaComponent, {rawAnalysis: raw});
+        return ce(SentenceComponent, {rawAnalysis: raw, annotated: doc.annotated[i], docUnique: unique, lineNumber: i});
       })),
   )
 }
 
 //
-interface FuriganaProps {
+interface SentenceProps {
   rawAnalysis: RawAnalysis;
+  annotated: AnnotatedAnalysis|undefined;
+  docUnique: string;
+  lineNumber: number;
 }
-function FuriganaComponent({rawAnalysis}: FuriganaProps) {
-  const setClickedHits = Recoil.useSetRecoilState(clickedHitsAtom);
+function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated: annotationAnalysis}: SentenceProps) {
+  const setClickedHits = Recoil.useSetRecoilState(clickedMorphemeAtom);
   const {furigana, hits} = rawAnalysis;
+  const click = {docUnique, lineNumber, annotations: annotationAnalysis};
   return ce('p', null,
-            ...furigana.flatMap((v, i) => v.map(o => typeof o === 'string'
-                                                         ? ce('span', {onClick: () => setClickedHits(hits[i])}, o)
-                                                         : ce('ruby', {onClick: () => setClickedHits(hits[i])}, o.ruby,
-                                                              ce('rt', null, o.rt)))));
+            ...furigana.flatMap(
+                (v, i) => v.map(o => typeof o === 'string'
+                                         ? ce('span', {onClick: () => setClickedHits({...click, rawHits: hits[i]})}, o)
+                                         : ce('ruby', {onClick: () => setClickedHits({...click, rawHits: hits[i]})},
+                                              o.ruby, ce('rt', null, o.rt)))));
 }
 
 //
@@ -176,7 +204,7 @@ function AddDocComponent({}: AddDocProps) {
                                                  : {sha1, text, hits: response.hits, furigana: response.furigana})
         }
         const unique = (new Date()).toISOString();
-        const newDoc: Doc = {name, unique, contents, raws};
+        const newDoc: Doc = {name, unique, contents, raws, annotated: Array.from(Array(contents.length))};
         db.upsert(uniqueToKey(unique), () => newDoc).then(() => setDocs(docs => ({...docs, [unique]: newDoc})));
       } else {
         console.error('error parsing sentences: ' + res.statusText);
@@ -196,14 +224,76 @@ interface v1ResSentenceAnalyzed {
 //
 interface HitsProps {}
 function HitsContainer({}: HitsProps) {
-  const hits = Recoil.useRecoilValue(clickedHitsAtom);
-  if (!hits) { return ce('div', null); }
-  return ce('div', null,
-            ...hits.results.map(v => ce('ol', null, ...v.results.map(result => ce('li', null, result.summary)))));
+  const click = Recoil.useRecoilValue(clickedMorphemeAtom);
+  const setDocs = Recoil.useSetRecoilState(docsAtom);
+  const setClick = Recoil.useSetRecoilState(clickedMorphemeAtom);
+  if (!click) { return ce('div', null); }
+  const {rawHits, annotations, lineNumber, docUnique} = click;
+
+  const wordIds: Set<string> = new Set();
+  if (annotations) {
+    for (const {wordId} of annotations.hits) { wordIds.add(wordId); }
+  }
+
+  function onClick(hit: ScoreHit, run: string|ContextCloze, startIdx: number, endIdx: number) {
+    setDocs(docs => {
+      // docs is frozen so we have to make copies of everything we want to manipuulate
+      const ret = {...docs}; // shallow-copy object
+      const thisDocOrig = docs[docUnique];
+      if (thisDocOrig) {
+        const thisDoc = {...thisDocOrig};              // shallow-copy object
+        thisDoc.annotated = thisDoc.annotated.slice(); // shallow-copy array, we'll be writing to this
+        const analysis = thisDoc.annotated[lineNumber];
+        if (analysis) {
+          // this line has analysis data
+          const hitIdx = analysis.hits.findIndex(o => o.run === run && o.wordId === hit.wordId);
+          if (hitIdx >= 0) {
+            // annotation exists, remove it
+            const newHits = analysis.hits.slice();                        // shallow-copy array
+            newHits.splice(hitIdx, 1);                                    // delete element in-place
+            thisDoc.annotated[lineNumber] = {...analysis, hits: newHits}; // shallow-copy object
+          } else {
+            const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
+            thisDoc.annotated[lineNumber] = {...analysis, hits: analysis.hits.concat(newAnnotatedHit)};
+          }
+        } else {
+          // no analysis data for this line, so set it up and add this hit
+          const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
+          thisDoc.annotated[lineNumber] = {
+            furigana: Array.from(Array(thisDoc.raws[lineNumber]?.furigana.length)),
+            hits: [newAnnotatedHit],
+            sha1: thisDoc.raws[lineNumber]?.sha1 || '',
+            text: thisDoc.raws[lineNumber]?.text || ''
+          };
+        }
+        ret[docUnique] = thisDoc;
+
+        // Don't forget to tell our clicked-hits about this
+        setClick(click => click ? {...click, annotations: thisDoc.annotated[lineNumber]} : click);
+
+        // Finally, write to Pouchdb
+        db.upsert(uniqueToKey(docUnique), () => ({...thisDoc}));
+        // Pouchdb will try to mutate is object so shallow-copy
+      }
+      return ret;
+    })
+  }
+  return ce(
+      'div', null,
+      ...rawHits.results.map(
+          v => ce(
+              'ol', null,
+              ...v.results.map(
+                  result => ce('li', null, result.summary,
+                               ce('button', {onClick: () => onClick(result, v.run, rawHits.startIdx, v.endIdx)},
+                                  wordIds.has(result.wordId) ? 'Entry highlighted! Remove?' : 'Create highlight?'))))));
 }
 
+/************
+Helper functions
+************/
 // https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/digest
-async function digestMessage(message: string, algorithm = 'SHA-1') {
+async function digestMessage(message: string, algorithm: string) {
   const msgUint8 = new TextEncoder().encode(message);                           // encode as (utf-8) Uint8Array
   const hashBuffer = await crypto.subtle.digest(algorithm, msgUint8);           // hash the message
   const hashArray = Array.from(new Uint8Array(hashBuffer));                     // convert buffer to byte array
