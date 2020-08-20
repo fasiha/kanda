@@ -1,4 +1,6 @@
-import React, {createElement as ce, useEffect, useState} from 'react';
+import './Docs.css';
+
+import {createElement as ce, useEffect, useState} from 'react';
 import Recoil from 'recoil';
 
 const NLP_SERVER = 'http://localhost:8133/api/v1/sentences';
@@ -10,8 +12,9 @@ type Docs = Partial<{[unique: string]: Doc}>;
 interface Doc {
   name: string;
   unique: string;
-  contents: string[];
-  raws: (RawAnalysis|undefined)[];
+  contents: string[];              // each element is a line
+  raws: (RawAnalysis|undefined)[]; // each element is a line
+  // contents.length === raws.length!
 }
 interface RawAnalysis {
   sha1: string;
@@ -47,6 +50,8 @@ Recoil: atoms & selectors
 ************/
 const docsAtom = Recoil.atom({key: 'docs', default: {} as Docs});
 const docSelector = Recoil.selectorFamily({key: 'doc', get: (unique: string) => ({get}) => get(docsAtom)[unique]});
+
+const clickedHitsAtom = Recoil.atom({key: 'rawAnalysis', default: undefined as undefined | (ScoreHits)});
 
 /************
 Pouchdb: what lives in the database
@@ -86,20 +91,29 @@ export function DocsComponent({}: DocsProps) {
       })();
     }
   }, [initialized]);
-  return ce(
+
+  const left = ce(
       'div',
-      {id: 'all-docs'},
+      {id: 'all-docs', className: 'left-containee'},
       ...Object.keys(docs).map(unique => ce(DocComponent, {unique})),
       ce(AddDocComponent),
   );
+  const right = ce(
+      'div',
+      {className: 'right-containee'},
+      ce(HitsContainer),
+  );
+  return ce('div', {className: 'container'}, left, right);
 }
 
+//
 interface DocProps {
   unique: string;
 }
 function DocComponent({unique}: DocProps) {
   const doc = Recoil.useRecoilValue(docSelector(unique));
   const setDocs = Recoil.useSetRecoilState(docsAtom);
+  const setClickedHits = Recoil.useSetRecoilState(clickedHitsAtom);
   if (!doc) { return ce('span'); }
   const deleteButton = ce('button', {
     onClick: () => setDocs(docs => {
@@ -114,23 +128,27 @@ function DocComponent({unique}: DocProps) {
       {className: 'doc'},
       ce('h2', null, doc.name || unique, deleteButton),
       ce('section', null, ...doc.raws.map((raw, i) => {
-        if (!raw) { return ce('p', null, doc.contents[i]); }
-        return ce(FuriganaComponent, {furigana: raw.furigana});
+        if (!raw) { return ce('p', {onClick: () => setClickedHits(undefined)}, doc.contents[i]); }
+        return ce(FuriganaComponent, {rawAnalysis: raw});
       })),
   )
 }
 
+//
 interface FuriganaProps {
-  furigana: Furigana[][];
+  rawAnalysis: RawAnalysis;
 }
-function FuriganaComponent({furigana}: FuriganaProps) {
-  return ce(
-      'p',
-      null,
-      ...furigana.flatMap(v => v.map(o => typeof o === 'string' ? o : ce('ruby', null, o.ruby, ce('rt', null, o.rt)))),
-  );
+function FuriganaComponent({rawAnalysis}: FuriganaProps) {
+  const setClickedHits = Recoil.useSetRecoilState(clickedHitsAtom);
+  const {furigana, hits} = rawAnalysis;
+  return ce('p', null,
+            ...furigana.flatMap((v, i) => v.map(o => typeof o === 'string'
+                                                         ? ce('span', {onClick: () => setClickedHits(hits[i])}, o)
+                                                         : ce('ruby', {onClick: () => setClickedHits(hits[i])}, o.ruby,
+                                                              ce('rt', null, o.rt)))));
 }
 
+//
 interface AddDocProps {}
 function AddDocComponent({}: AddDocProps) {
   const [name, setName] = useState('');
@@ -173,6 +191,15 @@ type v1ResSentence = string|v1ResSentenceAnalyzed;
 interface v1ResSentenceAnalyzed {
   furigana: Furigana[][];
   hits: ScoreHits[];
+}
+
+//
+interface HitsProps {}
+function HitsContainer({}: HitsProps) {
+  const hits = Recoil.useRecoilValue(clickedHitsAtom);
+  if (!hits) { return ce('div', null); }
+  return ce('div', null,
+            ...hits.results.map(v => ce('ol', null, ...v.results.map(result => ce('li', null, result.summary)))));
 }
 
 // https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/digest
