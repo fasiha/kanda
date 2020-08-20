@@ -25,12 +25,6 @@ interface RawAnalysis {
 }
 
 type Furigana = string|{ruby: string, rt: string};
-interface ScoreHit {
-  wordId: string;
-  score: number;
-  search: string;
-  summary?: string;
-}
 interface ScoreHits {
   startIdx: number;
   results: {
@@ -38,6 +32,12 @@ interface ScoreHits {
     run: string|ContextCloze,
     results: ScoreHit[],
   }[];
+}
+interface ScoreHit {
+  wordId: string;
+  score: number;
+  search: string;
+  summary?: string;
 }
 interface ContextCloze {
   left: string;
