@@ -234,7 +234,7 @@ function HitsContainer({}: HitsProps) {
 
   const wordIds: Set<string> = new Set();
   if (annotations) {
-    for (const {wordId} of annotations.hits) { wordIds.add(wordId); }
+    for (const {wordId, run} of annotations.hits) { wordIds.add(wordId + runToString(run)); }
   }
 
   function onClick(hit: ScoreHit, run: string|ContextCloze, startIdx: number, endIdx: number) {
@@ -283,12 +283,12 @@ function HitsContainer({}: HitsProps) {
   return ce(
       'div', null,
       ...rawHits.results.map(
-          v => ce(
-              'ol', null,
-              ...v.results.map(
-                  result => ce('li', null, ...highlight(v.run, result.summary),
-                               ce('button', {onClick: () => onClick(result, v.run, rawHits.startIdx, v.endIdx)},
-                                  wordIds.has(result.wordId) ? 'Entry highlighted! Remove?' : 'Create highlight?'))))));
+          v => ce('ol', null,
+                  ...v.results.map(
+                      result => ce('li', null, ...highlight(v.run, result.summary),
+                                   ce('button', {onClick: () => onClick(result, v.run, rawHits.startIdx, v.endIdx)},
+                                      wordIds.has(result.wordId + runToString(v.run)) ? 'Entry highlighted! Remove?'
+                                                                                      : 'Create highlight?'))))));
 }
 function highlight(needle: string|ContextCloze, haystack: string) {
   const needleChars = new Set((typeof needle === 'string' ? needle : needle.cloze).split(''));
@@ -305,4 +305,8 @@ async function digestMessage(message: string, algorithm: string) {
   const hashArray = Array.from(new Uint8Array(hashBuffer));                     // convert buffer to byte array
   const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join(''); // convert bytes to hex string
   return hashHex;
+}
+
+function runToString(run: string|ContextCloze): string {
+  return typeof run === 'string' ? run : `${run.left}${run.cloze}${run.right}`;
 }
