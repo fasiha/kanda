@@ -140,6 +140,8 @@ function DocComponent({unique}: DocProps) {
   const doc = Recoil.useRecoilValue(docSelector(unique));
   const setDocs = Recoil.useSetRecoilState(docsAtom);
   const setClickedHits = Recoil.useSetRecoilState(clickedMorphemeAtom);
+  const [editingMode, setEditingMode] = useState(false);
+
   if (!doc) { return ce('span'); }
   const deleteButton = ce('button', {
     onClick: () => deleteDoc(unique).then(() => setDocs(docs => {
@@ -149,14 +151,19 @@ function DocComponent({unique}: DocProps) {
                                           }))
   },
                           'Delete');
+  const editButton = ce('button', {onClick: () => setEditingMode(!editingMode)}, editingMode ? 'Cancel' : 'Edit');
+
+  const displayComponent = ce('section', null, ...doc.raws.map((raw, i) => {
+    if (!raw) { return ce('p', {onClick: () => setClickedHits(undefined)}, doc.contents[i]); }
+    return ce(SentenceComponent, {rawAnalysis: raw, annotated: doc.annotated[i], docUnique: unique, lineNumber: i});
+  }));
+  const editingComponent = ce(AddDocComponent, {existing: doc, done: () => setEditingMode(!editingMode)});
+
   return ce(
       'div',
       {className: 'doc'},
-      ce('h2', null, doc.name || unique, deleteButton),
-      ce('section', null, ...doc.raws.map((raw, i) => {
-        if (!raw) { return ce('p', {onClick: () => setClickedHits(undefined)}, doc.contents[i]); }
-        return ce(SentenceComponent, {rawAnalysis: raw, annotated: doc.annotated[i], docUnique: unique, lineNumber: i});
-      })),
+      ce('h2', null, doc.name || unique, deleteButton, editButton),
+      editingMode ? editingComponent : displayComponent,
   )
 }
 
@@ -193,10 +200,13 @@ function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated}: Sent
 }
 
 //
-interface AddDocProps {}
-function AddDocComponent({}: AddDocProps) {
-  const [name, setName] = useState('');
-  const [fullText, setContents] = useState('');
+interface AddDocProps {
+  existing?: Doc;
+  done?: () => void;
+}
+function AddDocComponent({existing: old, done}: AddDocProps) {
+  const [name, setName] = useState(old ? old.name : '');
+  const [fullText, setContents] = useState(old ? old.contents.join('') : '');
   const setDocs = Recoil.useSetRecoilState(docsAtom);
 
   const nameInput = ce('input', {type: 'text', value: name, onChange: e => setName(e.target.value)});
@@ -219,9 +229,53 @@ function AddDocComponent({}: AddDocProps) {
           raws.push(typeof response === 'string' ? undefined
                                                  : {sha1, text, hits: response.hits, furigana: response.furigana})
         }
-        const unique = (new Date()).toISOString();
+        const unique = old ? old.unique : (new Date()).toISOString();
+
         const newDoc: Doc = {name, unique, contents, raws, annotated: Array.from(Array(contents.length))};
-        db.upsert(uniqueToKey(unique), () => newDoc).then(() => setDocs(docs => ({...docs, [unique]: newDoc})));
+
+        if (old) {
+          for (const [lino, oldAnnotated] of old.annotated.entries()) {
+            const newRaw = raws[lino];
+            const oldRaw = old.raws[lino];
+            if (!oldAnnotated || !newRaw || !oldRaw) {
+              continue;
+            } // for now, can't merge if you CHANGE THE NUMBER OF LINES
+
+            const newAnnotated: AnnotatedAnalysis = {sha1: newRaw.sha1, text: newRaw.text, furigana: [], hits: []};
+            // furigana IS INVALID, has to be the same length as # of morphemes!
+
+            const oldFurigana: Map<string, Furigana[]> = new Map();
+            for (const f of oldAnnotated.furigana) {
+              if (f) { oldFurigana.set(furiganaToBase(f), f); }
+            }
+            newAnnotated.furigana = newRaw.furigana.map(f => oldFurigana.get(furiganaToBase(f)) || f);
+            // now newAnnotated.furigana is valid: we've replaced any base text that we'd overridden before. This could
+            // be incorrect: we might have only overridden one instance of a kanji and not another before whereas now
+            // we'll have overridden all instances of it.
+
+            // now let's see if the old dictionary hits still apply: they SHOULD right?
+            const newHaystack = newRaw.furigana.map(furiganaToBase);
+            for (const oldHit of oldAnnotated.hits) {
+              const oldNeedle = oldRaw.furigana.slice(oldHit.startIdx, oldHit.endIdx).map(furiganaToBase);
+              const hit = arraySearch(newHaystack, oldNeedle);
+              if (hit >= 0) {
+                const run = simplifyCloze(generateContextClozed(newHaystack.slice(0, hit).join(''), oldNeedle.join(''),
+                                                                newHaystack.slice(hit + oldNeedle.length).join('')));
+                newAnnotated.hits.push({
+                  summary: oldHit.summary,
+                  wordId: oldHit.wordId,
+                  run,
+                  startIdx: hit,
+                  endIdx: hit + oldNeedle.length
+                });
+              }
+            }
+            newDoc.annotated[lino] = newAnnotated;
+          }
+        }
+        db.upsert(uniqueToKey(unique), () => newDoc)
+            .then(() => setDocs(docs => ({...docs, [unique]: newDoc})))
+            .then(() => done ? done() : '');
       } else {
         console.error('error parsing sentences: ' + res.statusText);
       }
@@ -325,3 +379,61 @@ async function digestMessage(message: string, algorithm: string) {
 function runToString(run: string|ContextCloze): string {
   return typeof run === 'string' ? run : `${run.left}${run.cloze}${run.right}`;
 }
+
+function furiganaToBase(v: Furigana[]): string { return v.map(o => typeof o === 'string' ? o : o.ruby).join(''); }
+
+/**
+ * Like indexOf, but with arrays: all of needle has to match a sub-array of haystack
+ *
+ * N.B., this does not use Boyer-Moore preprocessing and is not optimized.
+ * @param haystack big array
+ * @param needle little array
+ * @param start where to start in haystack (just like indexOf)
+ */
+function arraySearch<T>(haystack: T[], needle: T[], start = 0): number {
+  if (needle.length > haystack.length) { return -1; }
+  outer: for (let hi = start; hi < (haystack.length - needle.length + 1); hi++) {
+    for (let ni = 0; ni < needle.length; ni++) {
+      if (haystack[hi + ni] !== needle[ni]) { continue outer; }
+    }
+    return hi;
+  }
+  return -1;
+}
+
+/**
+ * Ensure needle is found in haystack only once
+ * @param haystack big string
+ * @param needle little string
+ */
+function appearsExactlyOnce(haystack: string, needle: string): boolean {
+  const hit = haystack.indexOf(needle);
+  return hit >= 0 && haystack.indexOf(needle, hit + 1) < 0;
+}
+
+/**
+ * Given three consecutive substrings (the arguments), return `{left: left2, cloze, right: right2}` where
+ * `left2` and `right2` are as short as possible and `${left2}${cloze}${right2}` is unique in the full string.
+ * @param left left string, possibly empty
+ * @param cloze middle string
+ * @param right right string, possible empty
+ * @throws in the unlikely event that such a return string cannot be build (I cannot think of an example though)
+ */
+function generateContextClozed(left: string, cloze: string, right: string): ContextCloze {
+  const sentence = left + cloze + right;
+  let leftContext = '';
+  let rightContext = '';
+  let contextLength = 0;
+  while (!appearsExactlyOnce(sentence, leftContext + cloze + rightContext)) {
+    contextLength++;
+    if (contextLength > left.length && contextLength > right.length) {
+      console.error({sentence, left, cloze, right, leftContext, rightContext, contextLength});
+      throw new Error('Ran out of context to build unique cloze');
+    }
+    leftContext = left.slice(-contextLength);
+    rightContext = right.slice(0, contextLength);
+  }
+  return {left: leftContext, cloze, right: rightContext};
+}
+
+function simplifyCloze(c: ContextCloze): ContextCloze|string { return (!c.right && !c.left) ? c.cloze : c; }
