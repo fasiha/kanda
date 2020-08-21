@@ -98,6 +98,8 @@ async function getDocs(): Promise<Docs> {
   return ret
 }
 
+async function deleteDoc(unique: string) { return db.upsert(uniqueToKey(unique), () => ({_deleted: true})); }
+
 /************
 React components
 ************/
@@ -139,11 +141,11 @@ function DocComponent({unique}: DocProps) {
   const setClickedHits = Recoil.useSetRecoilState(clickedMorphemeAtom);
   if (!doc) { return ce('span'); }
   const deleteButton = ce('button', {
-    onClick: () => setDocs(docs => {
-      const ret = {...docs};
-      delete ret[unique];
-      return ret;
-    })
+    onClick: () => deleteDoc(unique).then(() => setDocs(docs => {
+                                            const ret = {...docs};
+                                            delete ret[unique];
+                                            return ret;
+                                          }))
   },
                           'Delete');
   return ce(
