@@ -262,7 +262,8 @@ function HitsContainer({}: HitsProps) {
         const analysis = thisDoc.annotated[lineNumber];
         if (analysis) {
           // this line has analysis data
-          const hitIdx = analysis.hits.findIndex(o => o.run === run && o.wordId === hit.wordId);
+          const runStr = runToString(run);
+          const hitIdx = analysis.hits.findIndex(o => o.wordId === hit.wordId && runToString(o.run) === runStr);
           if (hitIdx >= 0) {
             // annotation exists, remove it
             const newHits = analysis.hits.slice();                        // shallow-copy array
