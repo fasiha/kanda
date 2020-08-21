@@ -84,6 +84,7 @@ PouchDB.plugin(PouchUpsert);
 const db = new PouchDB('sidecar-docs');
 
 function uniqueToKey(unique: string) { return `doc-${unique}`; }
+
 async function getDocs(): Promise<Docs> {
   const startkey = uniqueToKey('');
   const res = await db.allDocs<Doc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
@@ -166,16 +167,29 @@ interface SentenceProps {
   docUnique: string;
   lineNumber: number;
 }
-function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated: annotationAnalysis}: SentenceProps) {
+function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated}: SentenceProps) {
   const setClickedHits = Recoil.useSetRecoilState(clickedMorphemeAtom);
   const {furigana, hits} = rawAnalysis;
-  const click = {docUnique, lineNumber, annotations: annotationAnalysis};
-  return ce('p', null,
-            ...furigana.flatMap(
-                (v, i) => v.map(o => typeof o === 'string'
-                                         ? ce('span', {onClick: () => setClickedHits({...click, rawHits: hits[i]})}, o)
-                                         : ce('ruby', {onClick: () => setClickedHits({...click, rawHits: hits[i]})},
-                                              o.ruby, ce('rt', null, o.rt)))));
+  const click = {docUnique, lineNumber, annotations: annotated};
+
+  // a morpheme will be in a run or not. It might be in multiple runs. A run is at least one morpheme wide but can span
+  // multiple whole morphemes. But here we don't need to worry about runs: just use start/endIdx.
+  const idxsAnnotated: Set<number> = new Set();
+  if (annotated) {
+    for (const {startIdx, endIdx} of annotated.hits) {
+      for (let i = startIdx; i < endIdx; i++) { idxsAnnotated.add(i); }
+    }
+  }
+  const c =
+      idxsAnnotated.size > 0 ? ((i: number) => idxsAnnotated.has(i) ? 'annotated-text' : undefined) : () => undefined;
+  return ce(
+      'p', null,
+      ...furigana.flatMap(
+          (v, i) => v.map(
+              o => typeof o === 'string'
+                       ? ce('span', {className: c(i), onClick: () => setClickedHits({...click, rawHits: hits[i]})}, o)
+                       : ce('ruby', {className: c(i), onClick: () => setClickedHits({...click, rawHits: hits[i]})},
+                            o.ruby, ce('rt', null, o.rt)))));
 }
 
 //
