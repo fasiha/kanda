@@ -101,6 +101,31 @@ async function getDocs(): Promise<Docs> {
 
 async function deleteDoc(unique: string) { return db.upsert(uniqueToKey(unique), () => ({_deleted: true})); }
 
+async function deletedDocIds(): Promise<string[]> {
+  const ret: string[] = [];
+  return new Promise((resolve, reject) => {
+    db.changes({filter: d => d._deleted})
+        .on('change', c => ret.push(c.id))
+        .on('complete', () => {resolve(ret)})
+        .on('error', e => reject(e));
+  });
+}
+
+async function deletedDocs() {
+  const ids = await deletedDocIds();
+  const pouchDocs = await Promise.all(ids.map(id => db.get(id, {revs: true, open_revs: 'all'}).then(x => {
+    const revs = (x[0].ok as any)._revisions;
+    const lastRev = (revs.start - 1) + '-' + revs.ids[1];
+    const ret = db.get(id, {rev: lastRev}); // with Pouchdb keys too
+    return ret;
+  })));
+  const docs: Doc[] =
+      (pouchDocs as (typeof pouchDocs[0]&Doc)[])
+          .map((o: Doc) =>
+                   ({name: o.name, unique: o.unique, contents: o.contents, raws: o.raws, annotated: o.annotated}));
+  return docs;
+}
+
 /************
 React components
 ************/
@@ -123,6 +148,7 @@ export function DocsComponent({}: DocsProps) {
       {id: 'all-docs', className: 'left-containee'},
       ...Object.keys(docs).map(unique => ce(DocComponent, {unique})),
       ce(AddDocComponent),
+      ce(UndeleteComponent),
   );
   const right = ce(
       'div',
@@ -362,6 +388,21 @@ function HitsContainer({}: HitsProps) {
 function highlight(needle: string|ContextCloze, haystack: string) {
   const needleChars = new Set((typeof needle === 'string' ? needle : needle.cloze).split(''));
   return haystack.split('').map(c => needleChars.has(c) ? ce('span', {className: 'highlighted'}, c) : c);
+}
+
+//
+function UndeleteComponent() {
+  const setDocs = Recoil.useSetRecoilState(docsAtom);
+  const [deleted, setDeleted] = useState([] as Doc[]);
+  const refreshButton =
+      ce('button', {onClick: () => deletedDocs().then(docs => setDeleted(docs))}, 'Refresh deleted docs');
+  const undelete = (doc: Doc) =>
+      db.upsert(doc.unique, () => doc).then(() => setDocs(docs => ({...docs, [doc.unique]: doc})));
+  return ce(
+      'div', null, ce('h2', null, 'Deleted'), refreshButton,
+      ce('ol', null,
+         ...deleted.map(doc => ce('li', null, `${doc.name} (${doc.unique}): ${doc.contents.join(' ').slice(0, 15)}…`,
+                                  ce('button', {onClick: () => undelete(doc)}, 'Undelete')))));
 }
 
 /************
