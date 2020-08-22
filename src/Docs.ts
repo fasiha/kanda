@@ -208,7 +208,7 @@ function DocComponent({unique}: DocProps) {
       {className: 'doc'},
       ce('h2', null, doc.name || unique, deleteButton, editButton),
       editOrRender,
-      ce(OverridesComponent, {overrides: doc.overrides}),
+      ce(OverridesComponent, {overrides: doc.overrides, docUnique: unique}),
   )
 }
 
@@ -242,7 +242,7 @@ function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated, overr
       idxsAnnotated.size > 0 ? ((i: number) => idxsAnnotated.has(i) ? 'annotated-text' : undefined) : () => undefined;
   return ce(
       'p', null,
-      ...furigana.map((morpheme, midx) => overrides[furiganaToBase(morpheme)] || annotated?.furigana[midx] || morpheme)
+      ...furigana.map((morpheme, midx) => annotated?.furigana[midx] || overrides[furiganaToBase(morpheme)] || morpheme)
           .flatMap((v, i) => v.map(o => {
             const fullClick = {
               ...click,
@@ -278,7 +278,7 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
       let oldLinesToIdx = new Map(old ? old.contents.map((line, i) => [line, i]) : []);
       let contentsForServer: string[] = old ? contents.filter(line => !oldLinesToIdx.has(line)) : contents;
       const res = await fetch(NLP_SERVER, {
-        body: JSON.stringify({sentences: contentsForServer, overrides: old?.overrides}),
+        body: JSON.stringify({sentences: contentsForServer}),
         headers: {'Content-Type': 'application/json'},
         method: 'POST',
       });
@@ -503,16 +503,18 @@ function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morpheme
         const raw = oldDoc?.raws[lineNumber];
         if (oldDoc && raw) {
           const doc = {...oldDoc};
-          if (global) { doc.overrides = {...doc.overrides, [baseText]: override}; }
-          // TODO if global, overwrite all existing usages too!
-          doc.annotated = doc.annotated.slice();
-          const annotated: AnnotatedAnalysis =
-              doc.annotated[lineNumber]
-                  ? {...(doc.annotated[lineNumber] as NonNullable<typeof doc.annotated[0]>)}
-                  : {text: raw.text, sha1: raw.sha1, furigana: Array.from(Array(raw.furigana.length)), hits: []};
-          annotated.furigana = annotated.furigana.slice();
-          annotated.furigana[morphemeIdx] = override;
-          doc.annotated[lineNumber] = annotated;
+          if (global) {
+            doc.overrides = {...doc.overrides, [baseText]: override};
+          } else {
+            doc.annotated = doc.annotated.slice();
+            const annotated: AnnotatedAnalysis =
+                doc.annotated[lineNumber]
+                    ? {...(doc.annotated[lineNumber] as NonNullable<typeof doc.annotated[0]>)}
+                    : {text: raw.text, sha1: raw.sha1, furigana: Array.from(Array(raw.furigana.length)), hits: []};
+            annotated.furigana = annotated.furigana.slice();
+            annotated.furigana[morphemeIdx] = override;
+            doc.annotated[lineNumber] = annotated;
+          }
           db.upsert(uniqueToKey(docUnique), () => ({...doc}));
           return {...docs, [docUnique]: doc};
         }
@@ -551,16 +553,25 @@ function UndeleteComponent() {
 //
 interface OverridesProps {
   overrides: Doc['overrides'];
+  docUnique: string;
 }
-function OverridesComponent({overrides}: OverridesProps) {
+function OverridesComponent({overrides, docUnique}: OverridesProps) {
+  const setter = Recoil.useSetRecoilState(docsAtom);
   const keys = Object.keys(overrides);
   if (keys.length === 0) { return ce(Fragment); }
-  return ce('div', null, ce('h3', null, 'Overrides'),
-            ce('ol', null,
-               ...keys.map(morpheme => ce(
-                               'li', null, `${morpheme} → `,
-                               ...overrides[morpheme].map(
-                                   f => typeof f === 'string' ? f : ce('ruby', null, f.ruby, ce('rt', null, f.rt)))))));
+  return ce('div', null, ce('h3', null, 'Overrides'), ce('ol', null, ...keys.map(morpheme => {
+              const onClick = () => setter(docs => {
+                const doc = {...(docs[docUnique] as NonNullable<typeof docs['']>)};
+                doc.overrides = {...doc.overrides};
+                delete doc.overrides[morpheme];
+                db.upsert(uniqueToKey(docUnique), () => ({...doc}));
+                return {...docs, [docUnique]: doc};
+              });
+              const fs = overrides[morpheme].map(
+                  f => typeof f === 'string' ? f : ce('ruby', null, f.ruby, ce('rt', null, f.rt)));
+              const deleter = ce('button', {onClick}, 'Delete');
+              return ce('li', null, `${morpheme} → `, ...fs, ' ', deleter);
+            })));
 }
 
 /************
