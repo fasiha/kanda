@@ -1,6 +1,6 @@
 import './Docs.css';
 
-import {createElement as ce, useEffect, useState} from 'react';
+import {createElement as ce, Fragment, useEffect, useState} from 'react';
 import Recoil from 'recoil';
 
 const NLP_SERVER = 'http://localhost:8133/api/v1/sentences';
@@ -19,7 +19,11 @@ interface Doc {
   overrides: Record<string, Furigana[]>;
 }
 
-type Furigana = string|{ruby: string, rt: string};
+interface Ruby {
+  ruby: string;
+  rt: string;
+}
+type Furigana = string|Ruby;
 interface AnnotatedAnalysis {
   sha1: string;
   text: string;
@@ -69,10 +73,13 @@ const docsAtom = Recoil.atom({key: 'docs', default: {} as Docs});
 const docSelector = Recoil.selectorFamily({key: 'doc', get: (unique: string) => ({get}) => get(docsAtom)[unique]});
 
 interface ClickedMorpheme {
+  morpheme?: {rawFurigana: Furigana[], annotatedFurigana?: Furigana[]};
+  morphemeIdx: number                       // for this morpheme
   rawHits: ScoreHits;                       // for this morpheme
   lineNumber: number;                       // for this line
   annotations: AnnotatedAnalysis|undefined; // for this line
   docUnique: string;                        // for this document
+  overrides: Doc['overrides'];              // for this document
 }
 const clickedMorphemeAtom = Recoil.atom({key: 'clickedMorpheme', default: undefined as undefined | ClickedMorpheme});
 
@@ -92,6 +99,7 @@ async function getDocs(): Promise<Docs> {
   const ret: Docs = {};
   for (const {doc} of res.rows) {
     if (doc) {
+      // `doc` will contain lots of PouchDb keys so lets just rebuild our clean Doc
       const obj: Doc = {
         name: doc.name,
         unique: doc.unique,
@@ -159,7 +167,7 @@ export function DocsComponent({}: DocsProps) {
   const right = ce(
       'div',
       {className: 'right-containee'},
-      ce(HitsContainer),
+      ce(HitsComponent),
   );
   return ce('div', {className: 'container'}, left, right);
 }
@@ -174,7 +182,7 @@ function DocComponent({unique}: DocProps) {
   const setClickedHits = Recoil.useSetRecoilState(clickedMorphemeAtom);
   const [editingMode, setEditingMode] = useState(false);
 
-  if (!doc) { return ce('span'); }
+  if (!doc) { return ce(Fragment); }
   const deleteButton = ce('button', {
     onClick: () => deleteDoc(unique).then(() => setDocs(docs => {
                                             const ret = {...docs};
@@ -185,19 +193,22 @@ function DocComponent({unique}: DocProps) {
                           'Delete');
   const editButton = ce('button', {onClick: () => setEditingMode(!editingMode)}, editingMode ? 'Cancel' : 'Edit');
 
+  const overrides = doc.overrides;
   const editOrRender =
-      editingMode ? ce(AddDocComponent, {existing: doc, done: () => setEditingMode(!editingMode)})
-                  : ce('section', null, ...doc.raws.map((raw, i) => {
-                      if (!raw) { return ce('p', {onClick: () => setClickedHits(undefined)}, doc.contents[i]); }
-                      return ce(SentenceComponent,
-                                {rawAnalysis: raw, annotated: doc.annotated[i], docUnique: unique, lineNumber: i});
-                    }));
+      editingMode
+          ? ce(AddDocComponent, {existing: doc, done: () => setEditingMode(!editingMode)})
+          : ce('section', null, ...doc.raws.map((raw, i) => {
+              if (!raw) { return ce('p', {onClick: () => setClickedHits(undefined)}, doc.contents[i]); }
+              return ce(SentenceComponent,
+                        {rawAnalysis: raw, annotated: doc.annotated[i], docUnique: unique, lineNumber: i, overrides});
+            }));
 
   return ce(
       'div',
       {className: 'doc'},
       ce('h2', null, doc.name || unique, deleteButton, editButton),
       editOrRender,
+      ce(OverridesComponent, {overrides: doc.overrides}),
   )
 }
 
@@ -207,11 +218,17 @@ interface SentenceProps {
   annotated: AnnotatedAnalysis|undefined;
   docUnique: string;
   lineNumber: number;
+  overrides: Doc['overrides'];
 }
-function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated}: SentenceProps) {
+function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated, overrides}: SentenceProps) {
   const setClickedHits = Recoil.useSetRecoilState(clickedMorphemeAtom);
   const {furigana, hits} = rawAnalysis;
-  const click = {docUnique, lineNumber, annotations: annotated};
+  const click = {
+    docUnique,
+    lineNumber,
+    annotations: annotated,
+    overrides,
+  };
 
   // a morpheme will be in a run or not. It might be in multiple runs. A run is at least one morpheme wide but can span
   // multiple whole morphemes. But here we don't need to worry about runs: just use start/endIdx.
@@ -225,12 +242,19 @@ function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated}: Sent
       idxsAnnotated.size > 0 ? ((i: number) => idxsAnnotated.has(i) ? 'annotated-text' : undefined) : () => undefined;
   return ce(
       'p', null,
-      ...furigana.flatMap(
-          (v, i) => v.map(
-              o => typeof o === 'string'
-                       ? ce('span', {className: c(i), onClick: () => setClickedHits({...click, rawHits: hits[i]})}, o)
-                       : ce('ruby', {className: c(i), onClick: () => setClickedHits({...click, rawHits: hits[i]})},
-                            o.ruby, ce('rt', null, o.rt)))));
+      ...furigana.map((morpheme, midx) => overrides[furiganaToBase(morpheme)] || annotated?.furigana[midx] || morpheme)
+          .flatMap((v, i) => v.map(o => {
+            const fullClick = {
+              ...click,
+              rawHits: hits[i],
+              morpheme: {rawFurigana: rawAnalysis.furigana[i], annotatedFurigana: annotated?.furigana[i]},
+              morphemeIdx: i,
+            };
+            if (typeof o === 'string') {
+              return ce('span', {className: c(i), onClick: () => setClickedHits(fullClick)}, o)
+            }
+            return ce('ruby', {className: c(i), onClick: () => setClickedHits(fullClick)}, o.ruby, ce('rt', null, o.rt))
+          })));
 }
 
 //
@@ -352,12 +376,12 @@ interface v1ResSentenceAnalyzed {
 
 //
 interface HitsProps {}
-function HitsContainer({}: HitsProps) {
+function HitsComponent({}: HitsProps) {
   const click = Recoil.useRecoilValue(clickedMorphemeAtom);
   const setDocs = Recoil.useSetRecoilState(docsAtom);
   const setClick = Recoil.useSetRecoilState(clickedMorphemeAtom);
   if (!click) { return ce('div', null); }
-  const {rawHits, annotations, lineNumber, docUnique} = click;
+  const {rawHits, annotations, lineNumber, docUnique, morphemeIdx} = click;
 
   const wordIds: Set<string> = new Set();
   if (annotations) {
@@ -409,18 +433,103 @@ function HitsContainer({}: HitsProps) {
     })
   }
   return ce(
-      'div', null,
+      'div',
+      null,
       ...rawHits.results.map(
           v => ce('ol', null,
                   ...v.results.map(
                       result => ce('li', null, ...highlight(v.run, result.summary),
                                    ce('button', {onClick: () => onClick(result, v.run, rawHits.startIdx, v.endIdx)},
                                       wordIds.has(result.wordId + runToString(v.run)) ? 'Entry highlighted! Remove?'
-                                                                                      : 'Create highlight?'))))));
+                                                                                      : 'Create highlight?'))))),
+      ce(OverrideComponent, {
+        morpheme: click.morpheme,
+        overrides: click.overrides,
+        docUnique,
+        lineNumber,
+        morphemeIdx,
+        key: `${docUnique}${lineNumber}${morphemeIdx}`,
+        // without `key`, we run into this problem
+        // https://reactjs.org/blog/2018/06/07/you-probably-dont-need-derived-state.html
+      }),
+
+  );
 }
 function highlight(needle: string|ContextCloze, haystack: string) {
   const needleChars = new Set((typeof needle === 'string' ? needle : needle.cloze).split(''));
   return haystack.split('').map(c => needleChars.has(c) ? ce('span', {className: 'highlighted'}, c) : c);
+}
+
+interface OverrideProps {
+  morpheme: ClickedMorpheme['morpheme'];
+  overrides: Doc['overrides'];
+  docUnique: string;
+  lineNumber: number;
+  morphemeIdx: number;
+}
+function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morphemeIdx}: OverrideProps) {
+  const rubys: Ruby[] =
+      (morpheme?.annotatedFurigana || morpheme?.rawFurigana || []).filter(s => typeof s !== 'string') as Ruby[];
+  const baseText = furiganaToBase(morpheme?.annotatedFurigana || morpheme?.rawFurigana || []);
+
+  const setDocs = Recoil.useSetRecoilState(docsAtom);
+  const defaultTexts = rubys.map(o => o.rt);
+  const defaultGlobal = baseText in overrides;
+  const [texts, setTexts] = useState(defaultTexts);
+  const [global, setGlobal] = useState(defaultGlobal);
+
+  if (rubys.length === 0 || !morpheme) { return ce(Fragment); } // `!morpheme` so TS knows it's not undefined
+
+  const inputs = texts.map((text, ridx) => ce('input', {
+                             type: 'text',
+                             value: text,
+                             onChange: e => setTexts(texts.map((text, i) => i === ridx ? e.target.value : text))
+                           }));
+  const checkbox =
+      ce('input', {type: 'checkbox', name: 'globalCheckbox', checked: global, onChange: () => setGlobal(!global)});
+  const label = ce('label', {htmlFor: 'globalCheckbox'}, 'Global override?'); // Just `for` breaks clang-format :-/
+  const submit = ce('button', {
+    onClick: () => {
+      setDocs(docs => {
+        const override: Furigana[] = [];
+        {
+          let textsIdx = 0;
+          for (const raw of morpheme.rawFurigana) {
+            override.push(typeof raw === 'string' ? raw : {ruby: raw.ruby, rt: texts[textsIdx++]});
+          }
+        }
+        const oldDoc = docs[docUnique];
+        const raw = oldDoc?.raws[lineNumber];
+        if (oldDoc && raw) {
+          const doc = {...oldDoc};
+          if (global) { doc.overrides = {...doc.overrides, [baseText]: override}; }
+          // TODO if global, overwrite all existing usages too!
+          doc.annotated = doc.annotated.slice();
+          const annotated: AnnotatedAnalysis =
+              doc.annotated[lineNumber]
+                  ? {...(doc.annotated[lineNumber] as NonNullable<typeof doc.annotated[0]>)}
+                  : {text: raw.text, sha1: raw.sha1, furigana: Array.from(Array(raw.furigana.length)), hits: []};
+          annotated.furigana = annotated.furigana.slice();
+          annotated.furigana[morphemeIdx] = override;
+          doc.annotated[lineNumber] = annotated;
+          db.upsert(uniqueToKey(docUnique), () => ({...doc}));
+          return {...docs, [docUnique]: doc};
+        }
+        return docs;
+      })
+    }
+  },
+                    'Submit override');
+  const cancel = ce('button', {
+    onClick: () => {
+      setTexts(defaultTexts);
+      setGlobal(defaultGlobal);
+    }
+  },
+                    'Cancel');
+
+  return ce('div', null, ce('h3', null, 'Override for: ' + baseText),
+            ce('ol', null, ...rubys.map((r, i) => ce('li', null, r.ruby + ' ', inputs[i]))), label, checkbox, submit);
 }
 
 //
@@ -436,6 +545,21 @@ function UndeleteComponent() {
       ce('ol', null,
          ...deleted.map(doc => ce('li', null, `${doc.name} (${doc.unique}): ${doc.contents.join(' ').slice(0, 15)}…`,
                                   ce('button', {onClick: () => undelete(doc)}, 'Undelete')))));
+}
+
+//
+interface OverridesProps {
+  overrides: Doc['overrides'];
+}
+function OverridesComponent({overrides}: OverridesProps) {
+  const keys = Object.keys(overrides);
+  if (keys.length === 0) { return ce(Fragment); }
+  return ce('div', null, ce('h3', null, 'Overrides'),
+            ce('ol', null,
+               ...keys.map(morpheme => ce(
+                               'li', null, `${morpheme} → `,
+                               ...overrides[morpheme].map(
+                                   f => typeof f === 'string' ? f : ce('ruby', null, f.ruby, ce('rt', null, f.rt)))))));
 }
 
 /************
