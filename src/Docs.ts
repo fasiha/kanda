@@ -16,8 +16,10 @@ interface Doc {
   raws: (undefined|RawAnalysis)[];            // each element is a line (a light might be English, so undefined)
   annotated: (AnnotatedAnalysis|undefined)[]; // each element is a line
   // contents.length === raws.length === annotated.length!
+  overrides: Record<string, Furigana[]>;
 }
 
+type Furigana = string|{ruby: string, rt: string};
 interface AnnotatedAnalysis {
   sha1: string;
   text: string;
@@ -32,7 +34,6 @@ interface RawAnalysis {
   // furigana.length === hits.length!
 }
 
-type Furigana = string|{ruby: string, rt: string};
 interface AnnotatedHit {
   run: string|ContextCloze;
   startIdx: number;
@@ -91,8 +92,14 @@ async function getDocs(): Promise<Docs> {
   const ret: Docs = {};
   for (const {doc} of res.rows) {
     if (doc) {
-      const obj:
-          Doc = {name: doc.name, unique: doc.unique, contents: doc.contents, raws: doc.raws, annotated: doc.annotated};
+      const obj: Doc = {
+        name: doc.name,
+        unique: doc.unique,
+        contents: doc.contents,
+        raws: doc.raws,
+        annotated: doc.annotated,
+        overrides: doc.overrides,
+      };
       ret[doc.unique] = obj;
     }
   }
@@ -119,10 +126,9 @@ async function deletedDocs() {
     const ret = db.get(id, {rev: lastRev}); // with Pouchdb keys too
     return ret;
   })));
-  const docs: Doc[] =
-      (pouchDocs as (typeof pouchDocs[0]&Doc)[])
-          .map((o: Doc) =>
-                   ({name: o.name, unique: o.unique, contents: o.contents, raws: o.raws, annotated: o.annotated}));
+  const docs: Doc[] = (pouchDocs as (typeof pouchDocs[0]&Doc)[])
+                          .map(({name, unique, contents, raws, annotated, overrides}: Doc) =>
+                                   ({name, unique, contents, raws, annotated, overrides}));
   return docs;
 }
 
@@ -281,7 +287,7 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
           console.error('Warning: unexpected length of lines vs raw analysis vs annotated analysis',
                         {raws, annotated, contents});
         }
-        const newDoc: Doc = {name, unique, contents, raws, annotated};
+        const newDoc: Doc = {name, unique, contents, raws, annotated, overrides: old ? old.overrides : {}};
         if (old) {
           for (const [lino, oldAnnotated] of old.annotated.entries()) {
             const newRaw = newDoc.raws[lino];
