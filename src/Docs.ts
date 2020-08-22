@@ -278,7 +278,7 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
       let oldLinesToIdx = new Map(old ? old.contents.map((line, i) => [line, i]) : []);
       let contentsForServer: string[] = old ? contents.filter(line => !oldLinesToIdx.has(line)) : contents;
       const res = await fetch(NLP_SERVER, {
-        body: JSON.stringify({sentences: contentsForServer}),
+        body: JSON.stringify({sentences: contentsForServer, overrides: old?.overrides}),
         headers: {'Content-Type': 'application/json'},
         method: 'POST',
       });
@@ -460,6 +460,7 @@ function highlight(needle: string|ContextCloze, haystack: string) {
   return haystack.split('').map(c => needleChars.has(c) ? ce('span', {className: 'highlighted'}, c) : c);
 }
 
+//
 interface OverrideProps {
   morpheme: ClickedMorpheme['morpheme'];
   overrides: Doc['overrides'];
