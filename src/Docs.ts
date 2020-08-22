@@ -436,12 +436,12 @@ function HitsComponent({}: HitsProps) {
       'div',
       null,
       ...rawHits.results.map(
-          v => ce('ol', null,
-                  ...v.results.map(
-                      result => ce('li', null, ...highlight(v.run, result.summary),
-                                   ce('button', {onClick: () => onClick(result, v.run, rawHits.startIdx, v.endIdx)},
-                                      wordIds.has(result.wordId + runToString(v.run)) ? 'Entry highlighted! Remove?'
-                                                                                      : 'Create highlight?'))))),
+          v => ce('ol', null, ...v.results.map(result => {
+            const highlit = wordIds.has(result.wordId + runToString(v.run));
+            return ce('li', {className: highlit ? 'annotated-entry' : undefined}, ...highlight(v.run, result.summary),
+                      ce('button', {onClick: () => onClick(result, v.run, rawHits.startIdx, v.endIdx)},
+                         highlit ? 'Entry highlighted! Remove?' : 'Create highlight?'));
+          }))),
       ce(OverrideComponent, {
         morpheme: click.morpheme,
         overrides: click.overrides,

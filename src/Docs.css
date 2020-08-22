@@ -22,3 +22,7 @@
 .annotated-text {
   background-color: #7E69BD;
 }
+
+.annotated-entry {
+  font-weight: bold;
+}
