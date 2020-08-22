@@ -185,17 +185,19 @@ function DocComponent({unique}: DocProps) {
                           'Delete');
   const editButton = ce('button', {onClick: () => setEditingMode(!editingMode)}, editingMode ? 'Cancel' : 'Edit');
 
-  const displayComponent = ce('section', null, ...doc.raws.map((raw, i) => {
-    if (!raw) { return ce('p', {onClick: () => setClickedHits(undefined)}, doc.contents[i]); }
-    return ce(SentenceComponent, {rawAnalysis: raw, annotated: doc.annotated[i], docUnique: unique, lineNumber: i});
-  }));
-  const editingComponent = ce(AddDocComponent, {existing: doc, done: () => setEditingMode(!editingMode)});
+  const editOrRender =
+      editingMode ? ce(AddDocComponent, {existing: doc, done: () => setEditingMode(!editingMode)})
+                  : ce('section', null, ...doc.raws.map((raw, i) => {
+                      if (!raw) { return ce('p', {onClick: () => setClickedHits(undefined)}, doc.contents[i]); }
+                      return ce(SentenceComponent,
+                                {rawAnalysis: raw, annotated: doc.annotated[i], docUnique: unique, lineNumber: i});
+                    }));
 
   return ce(
       'div',
       {className: 'doc'},
       ce('h2', null, doc.name || unique, deleteButton, editButton),
-      editingMode ? editingComponent : displayComponent,
+      editOrRender,
   )
 }
 
