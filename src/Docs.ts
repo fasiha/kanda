@@ -232,7 +232,7 @@ interface AddDocProps {
 }
 function AddDocComponent({existing: old, done}: AddDocProps) {
   const [name, setName] = useState(old ? old.name : '');
-  const [fullText, setContents] = useState(old ? old.contents.join('') : '');
+  const [fullText, setContents] = useState(old ? old.contents.join('\n') : '');
   const setDocs = Recoil.useSetRecoilState(docsAtom);
 
   const nameInput = ce('input', {type: 'text', value: name, onChange: e => setName(e.target.value)});
@@ -241,31 +241,55 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
   const submit = ce('button', {
     onClick: async () => {
       const contents = fullText.split('\n');
-      const raws: Doc['raws'] = [];
+
+      // Don't resubmit old sentences to server
+      let oldLinesToIdx = new Map(old ? old.contents.map((line, i) => [line, i]) : []);
+      let contentsForServer: string[] = old ? contents.filter(line => !oldLinesToIdx.has(line)) : contents;
       const res = await fetch(NLP_SERVER, {
-        body: JSON.stringify({sentences: contents}),
+        body: JSON.stringify({sentences: contentsForServer}),
         headers: {'Content-Type': 'application/json'},
         method: 'POST',
       });
       if (res.ok) {
+        const raws: Doc['raws'] = [];
+        const annotated: Doc['annotated'] = [];
         const resData: v1ResSentence[] = await res.json();
-        for (const [i, response] of resData.entries()) {
-          const text = contents[i];
-          const sha1 = await digestMessage(text, 'sha-1');
-          raws.push(typeof response === 'string' ? undefined
-                                                 : {sha1, text, hits: response.hits, furigana: response.furigana})
+        {
+          let resIdx = 0;
+          for (const text of contents) {
+            const hit = oldLinesToIdx.get(text);
+            if (old && hit !== undefined) { // `old` check here is TS pacification: oldLinesToIdx empty if no `old`
+              raws.push(old.raws[hit]);
+              annotated.push(old.annotated[hit]);
+            } else {
+              const response = resData[resIdx];
+              raws.push(typeof response === 'string' ? undefined : {
+                sha1: await digestMessage(text, 'sha-1'),
+                text,
+                hits: response.hits,
+                furigana: response.furigana
+              });
+              annotated.push(undefined);
+
+              resIdx++;
+            }
+          }
         }
         const unique = old ? old.unique : (new Date()).toISOString();
 
-        const newDoc: Doc = {name, unique, contents, raws, annotated: Array.from(Array(contents.length))};
-
+        if (!(raws.length === annotated.length && annotated.length === contents.length)) {
+          console.error('Warning: unexpected length of lines vs raw analysis vs annotated analysis',
+                        {raws, annotated, contents});
+        }
+        const newDoc: Doc = {name, unique, contents, raws, annotated};
         if (old) {
           for (const [lino, oldAnnotated] of old.annotated.entries()) {
-            const newRaw = raws[lino];
+            const newRaw = newDoc.raws[lino];
             const oldRaw = old.raws[lino];
-            if (!oldAnnotated || !newRaw || !oldRaw) {
-              continue;
-            } // for now, can't merge if you CHANGE THE NUMBER OF LINES
+            if (!oldAnnotated || !newRaw || !oldRaw || newDoc.annotated[lino]) { continue; }
+            // for now, you can only merge LINE TO LINE, so if you add or delete a line with Japanese in the middle of
+            // the text, annotations after it won't line up. Skip if we got annotations from old (i.e., line with no
+            // change and wasn't reparsed by the server)
 
             const newAnnotated: AnnotatedAnalysis = {sha1: newRaw.sha1, text: newRaw.text, furigana: [], hits: []};
             // furigana IS INVALID, has to be the same length as # of morphemes!
@@ -308,7 +332,8 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
     }
   },
                     'Submit');
-  return ce('div', null, ce('h2', null, 'Create a new document'), nameInput, ce('br'), contentsInput, ce('br'), submit);
+  return ce('div', null, old ? '' : ce('h2', null, 'Create a new document'), nameInput, ce('br'), contentsInput,
+            ce('br'), submit);
 }
 
 type v1ResSentence = string|v1ResSentenceAnalyzed;
