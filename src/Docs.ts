@@ -209,7 +209,17 @@ function DocComponent({unique}: DocProps) {
       ce('h2', null, doc.name || unique, deleteButton, editButton),
       editOrRender,
       ce(OverridesComponent, {overrides: doc.overrides, docUnique: unique}),
+      ce(AllAnnotationsComponent, {doc}),
   )
+}
+
+//
+interface AllAnnotationsProps {
+  doc: Doc;
+}
+function AllAnnotationsComponent({doc}: AllAnnotationsProps) {
+  return ce('details', {className: 'regular-sized'}, ce('summary', null, 'All dictionary annotations'),
+            ce('ol', null, ...doc.annotated.flatMap(v => v?.hits.map(o => ce('li', null, o.summary))).filter(x => !!x)))
 }
 
 //

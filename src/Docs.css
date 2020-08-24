@@ -9,6 +9,10 @@
   font-size: xx-large; /* xxx-large is unsupported in Safari as of Aug 2020 */
 }
 
+.regular-sized {
+  font-size: medium;
+}
+
 .right-containee {
   height: 100vh;
   overflow-y: scroll;
