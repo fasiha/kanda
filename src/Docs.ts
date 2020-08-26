@@ -3,7 +3,7 @@ import './Docs.css';
 import {createElement as ce, Fragment, useEffect, useState} from 'react';
 import Recoil from 'recoil';
 
-const NLP_SERVER = 'http://localhost:8133/api/v1/sentences';
+const NLP_SERVER = 'https://curtiz-japanese-nlp.glitch.me/api/v1/sentences';
 
 /************
 Data model
