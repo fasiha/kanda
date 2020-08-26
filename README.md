@@ -1,7 +1,21 @@
-Experimental [Curtiz-Japanese-NLP](https://github.com/fasiha/curtiz-japanese-nlp) web-based frontend for annotation editors.
+# Kanda
+Experimental web-based frontend for annotating Japanese text for intensive reading. Backed by [Curtiz-Japanese-NLP](https://github.com/fasiha/curtiz-japanese-nlp).
 
-- Clone this repo
-- Create a directory (or symlink) in `public/dict-hits-per-line` which contains JSON files output by Curtiz-Japanese-NLP annotator (multiple `line-<base64URL-encoded MD5 checksum>.json` files, one for each line, as well as a file named `jb.json` which is the same as a `lightweight-<base64URL-encoded MD5 checksum of the entire file>.json`).
-- `npm i`
-- `npx snowpack dev`
-- view the site
+Visit **https://fasiha.github.io/kanda** to use the app!
+
+## Dev
+> Go [here](https://fasiha.github.io/kanda) to *use* the app. The rest of this section is for developers seeking to build and run it locally.
+
+Install recent versions of [Git](https://git-scm.com) and [Node.js](https://nodejs.org) if you don't have them already. Then, at the command line (Terminal, xterm, Command Prompt, etc.), run the following:
+```console
+git checkout https://github.com/fasiha/kanda
+cd kanda
+npm i
+npx snowpack dev
+```
+Then, open http://localhost:8080/
+
+> By default, this will hit Curtiz-Japanese-NLP running on [Glitch](https://curtiz-japanese-nlp.glitch.me). If you'd like to have a much faster local experience, install 
+> - MeCab,
+> - UniDic, 
+> - [Curtiz-Japanese-NLP](https://github.com/fasiha/curtiz-japanese-nlp) and run it.
