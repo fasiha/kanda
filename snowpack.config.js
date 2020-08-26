@@ -1,7 +1,7 @@
 module.exports = {
   "extends": "@snowpack/app-scripts-react",
   "plugins": [],
-  "mount": {"/dict-hits-per-line": "/dict-hits-per-line"},
+  buildOptions: {baseUrl: '/kanda/'},
   installOptions: {
     rollup: {
       plugins: [require('rollup-plugin-node-polyfills')()], // needed for PouchDB which imports "events"?
