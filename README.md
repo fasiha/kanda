@@ -3,6 +3,8 @@ Experimental web-based frontend for annotating Japanese text for intensive readi
 
 Visit **https://fasiha.github.io/kanda** to use the app!
 
+![Kanda app](demo.png)
+
 ## Dev
 > Go [here](https://fasiha.github.io/kanda) to *use* the app. The rest of this section is for developers seeking to build and run it locally.
 
