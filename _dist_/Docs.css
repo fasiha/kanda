@@ -30,3 +30,8 @@
 .annotated-entry {
   font-weight: bold;
 }
+
+.doc textarea{
+  width: 100%;
+  height: 33vh;
+}
