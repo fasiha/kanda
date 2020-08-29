@@ -34,4 +34,10 @@ const code=`.container {
 .doc textarea{
   width: 100%;
   height: 33vh;
+}
+
+.limited-height {
+  max-height: 33vh;
+  overflow-y: scroll;
+  background-color: #5218FA; /* "Han purple" according to https://www.htmlcsscolor.com/hex/5218FA */
 }`,styleEl=document.createElement("style"),codeEl=document.createTextNode(code);styleEl.type="text/css",styleEl.appendChild(codeEl),document.head.appendChild(styleEl);
