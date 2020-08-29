@@ -218,7 +218,7 @@ interface AllAnnotationsProps {
   doc: Doc;
 }
 function AllAnnotationsComponent({doc}: AllAnnotationsProps) {
-  return ce('details', {className: 'regular-sized'}, ce('summary', null, 'All dictionary annotations'),
+  return ce('details', {className: 'regular-sized limited-height'}, ce('summary', null, 'All dictionary annotations'),
             ce('ol', null, ...doc.annotated.flatMap(v => v?.hits.map(o => ce('li', null, o.summary))).filter(x => !!x)))
 }
 
