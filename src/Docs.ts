@@ -69,8 +69,9 @@ interface ContextCloze {
 /************
 Recoil: atoms & selectors
 ************/
-const docsAtom = Recoil.atom({key: 'docs', default: {} as Docs});
-const docSelector = Recoil.selectorFamily({key: 'doc', get: (unique: string) => ({get}) => get(docsAtom)[unique]});
+const docNamesAtom = Recoil.atom({key: 'docList', default: [] as string[]});
+const docAtoms = Recoil.atomFamily({key: 'docAtom', default: undefined as undefined | Doc});
+// const docSelector = Recoil.selectorFamily({key: 'doc', get: (unique: string) => ({get}) => get(docsAtoms)[unique]});
 
 interface ClickedMorpheme {
   morpheme?: {rawFurigana: Furigana[], annotatedFurigana?: Furigana[]};
@@ -145,13 +146,14 @@ React components
 ************/
 interface DocsProps {}
 export function DocsComponent({}: DocsProps) {
-  const [docs, setDocs] = Recoil.useRecoilState(docsAtom);
+  const [docList, setDocList] = Recoil.useRecoilState(docNamesAtom);
+  // const [docs, setDocs] = Recoil.useRecoilState(docAtoms);
   const [initialized, setInitialized] = useState(false);
   useEffect(() => {
     if (!initialized) {
       (async () => {
         const fromdb = await getDocs();
-        if (Object.keys(fromdb).length > 0) { setDocs(fromdb); }
+        if (Object.keys(fromdb).length > 0) { setDocList(Object.keys(fromdb)); }
         setInitialized(true);
       })();
     }
@@ -160,7 +162,7 @@ export function DocsComponent({}: DocsProps) {
   const left = ce(
       'div',
       {id: 'all-docs', className: 'left-containee'},
-      ...Object.keys(docs).map(unique => ce(DocComponent, {unique})),
+      ...docList.map(unique => ce(DocComponent, {unique})),
       ce(AddDocComponent),
       ce(UndeleteComponent),
   );
@@ -177,20 +179,25 @@ interface DocProps {
   unique: string;
 }
 function DocComponent({unique}: DocProps) {
-  const doc = Recoil.useRecoilValue(docSelector(unique));
-  const setDocs = Recoil.useSetRecoilState(docsAtom);
+  // const doc = Recoil.useRecoilValue(docSelector(unique));
+  const [doc, setDoc] = Recoil.useRecoilState(docAtoms(unique));
+  const setDocList = Recoil.useSetRecoilState(docNamesAtom);
   const setClickedHits = Recoil.useSetRecoilState(clickedMorphemeAtom);
   const [editingMode, setEditingMode] = useState(false);
 
+  useEffect(() => {
+    if (doc === undefined) {
+      (async () => {
+        const fromdb = await getDocs();
+        const newDoc = fromdb[unique];
+        if (newDoc) { setDoc(newDoc); }
+      })();
+    }
+  }, [doc === undefined]);
+
   if (!doc) { return ce(Fragment); }
-  const deleteButton = ce('button', {
-    onClick: () => deleteDoc(unique).then(() => setDocs(docs => {
-                                            const ret = {...docs};
-                                            delete ret[unique];
-                                            return ret;
-                                          }))
-  },
-                          'Delete');
+  const deleteButton = ce(
+      'button', {onClick: () => deleteDoc(unique).then(() => setDocList(v => v.filter(x => x !== unique)))}, 'Delete');
   const editButton = ce('button', {onClick: () => setEditingMode(!editingMode)}, editingMode ? 'Cancel' : 'Edit');
 
   const overrides = doc.overrides;
@@ -231,6 +238,7 @@ interface SentenceProps {
   overrides: Doc['overrides'];
 }
 function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated, overrides}: SentenceProps) {
+  console.log('rerendering', docUnique, lineNumber);
   const setClickedHits = Recoil.useSetRecoilState(clickedMorphemeAtom);
   const {furigana, hits} = rawAnalysis;
   const click = {
@@ -275,7 +283,7 @@ interface AddDocProps {
 function AddDocComponent({existing: old, done}: AddDocProps) {
   const [name, setName] = useState(old ? old.name : '');
   const [fullText, setContents] = useState(old ? old.contents.join('\n') : '');
-  const setDocs = Recoil.useSetRecoilState(docsAtom);
+  const setDocList = Recoil.useSetRecoilState(docNamesAtom);
 
   const nameInput = ce('input', {type: 'text', value: name, onChange: e => setName(e.target.value)});
   const contentsInput =
@@ -366,7 +374,7 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
           }
         }
         db.upsert(uniqueToKey(unique), () => newDoc)
-            .then(() => setDocs(docs => ({...docs, [unique]: newDoc})))
+            .then(() => setDocList(list => list.concat(unique)))
             .then(() => done ? done() : '');
       } else {
         console.error('error parsing sentences: ' + res.statusText);
@@ -388,7 +396,7 @@ interface v1ResSentenceAnalyzed {
 interface HitsProps {}
 function HitsComponent({}: HitsProps) {
   const click = Recoil.useRecoilValue(clickedMorphemeAtom);
-  const setDocs = Recoil.useSetRecoilState(docsAtom);
+  const setDoc = Recoil.useSetRecoilState(docAtoms(click?.docUnique));
   const setClick = Recoil.useSetRecoilState(clickedMorphemeAtom);
   if (!click) { return ce('div', null); }
   const {rawHits, annotations, lineNumber, docUnique, morphemeIdx} = click;
@@ -399,12 +407,10 @@ function HitsComponent({}: HitsProps) {
   }
 
   function onClick(hit: ScoreHit, run: string|ContextCloze, startIdx: number, endIdx: number) {
-    setDocs(docs => {
-      // docs is frozen so we have to make copies of everything we want to manipuulate
-      const ret = {...docs}; // shallow-copy object
-      const thisDocOrig = docs[docUnique];
-      if (thisDocOrig) {
-        const thisDoc = {...thisDocOrig};              // shallow-copy object
+    setDoc(docOrig => {
+      // docOrig is frozen so we have to make copies of everything we want to manipuulate
+      if (docOrig) {
+        const thisDoc = {...docOrig};                  // shallow-copy object
         thisDoc.annotated = thisDoc.annotated.slice(); // shallow-copy array, we'll be writing to this
         const analysis = thisDoc.annotated[lineNumber];
         if (analysis) {
@@ -430,7 +436,6 @@ function HitsComponent({}: HitsProps) {
             text: thisDoc.raws[lineNumber]?.text || ''
           };
         }
-        ret[docUnique] = thisDoc;
 
         // Don't forget to tell our clicked-hits about this
         setClick(click => click ? {...click, annotations: thisDoc.annotated[lineNumber]} : click);
@@ -438,8 +443,9 @@ function HitsComponent({}: HitsProps) {
         // Finally, write to Pouchdb
         db.upsert(uniqueToKey(docUnique), () => ({...thisDoc}));
         // Pouchdb will try to mutate is object so shallow-copy
+
+        return thisDoc;
       }
-      return ret;
     })
   }
   return ce(
@@ -483,7 +489,7 @@ function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morpheme
       (morpheme?.annotatedFurigana || morpheme?.rawFurigana || []).filter(s => typeof s !== 'string') as Ruby[];
   const baseText = furiganaToBase(morpheme?.annotatedFurigana || morpheme?.rawFurigana || []);
 
-  const setDocs = Recoil.useSetRecoilState(docsAtom);
+  const setDoc = Recoil.useSetRecoilState(docAtoms(docUnique));
   const defaultTexts = rubys.map(o => o.rt);
   const defaultGlobal = baseText in overrides;
   const [texts, setTexts] = useState(defaultTexts);
@@ -501,7 +507,7 @@ function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morpheme
   const label = ce('label', {htmlFor: 'globalCheckbox'}, 'Global override?'); // Just `for` breaks clang-format :-/
   const submit = ce('button', {
     onClick: () => {
-      setDocs(docs => {
+      setDoc(oldDoc => {
         const override: Furigana[] = [];
         {
           let textsIdx = 0;
@@ -509,7 +515,7 @@ function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morpheme
             override.push(typeof raw === 'string' ? raw : {ruby: raw.ruby, rt: texts[textsIdx++]});
           }
         }
-        const oldDoc = docs[docUnique];
+        // const oldDoc = docs[docUnique];
         const raw = oldDoc?.raws[lineNumber];
         if (oldDoc && raw) {
           const doc = {...oldDoc};
@@ -526,9 +532,8 @@ function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morpheme
             doc.annotated[lineNumber] = annotated;
           }
           db.upsert(uniqueToKey(docUnique), () => ({...doc}));
-          return {...docs, [docUnique]: doc};
+          return doc;
         }
-        return docs;
       })
     }
   },
@@ -547,12 +552,12 @@ function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morpheme
 
 //
 function UndeleteComponent() {
-  const setDocs = Recoil.useSetRecoilState(docsAtom);
+  const setDocList = Recoil.useSetRecoilState(docNamesAtom);
   const [deleted, setDeleted] = useState([] as Doc[]);
   const refreshButton =
       ce('button', {onClick: () => deletedDocs().then(docs => setDeleted(docs))}, 'Refresh deleted docs');
   const undelete = (doc: Doc) =>
-      db.upsert(doc.unique, () => doc).then(() => setDocs(docs => ({...docs, [doc.unique]: doc})));
+      db.upsert(doc.unique, () => doc).then(() => setDocList(list => list.concat(doc.unique)));
   return ce(
       'div', null, ce('h2', null, 'Deleted'), refreshButton,
       ce('ol', null,
@@ -566,16 +571,18 @@ interface OverridesProps {
   docUnique: string;
 }
 function OverridesComponent({overrides, docUnique}: OverridesProps) {
-  const setter = Recoil.useSetRecoilState(docsAtom);
+  const setter = Recoil.useSetRecoilState(docAtoms(docUnique));
   const keys = Object.keys(overrides);
   if (keys.length === 0) { return ce(Fragment); }
   return ce('div', null, ce('h3', null, 'Overrides'), ce('ol', null, ...keys.map(morpheme => {
-              const onClick = () => setter(docs => {
-                const doc = {...(docs[docUnique] as NonNullable<typeof docs['']>)};
-                doc.overrides = {...doc.overrides};
-                delete doc.overrides[morpheme];
-                db.upsert(uniqueToKey(docUnique), () => ({...doc}));
-                return {...docs, [docUnique]: doc};
+              const onClick = () => setter(doc => {
+                // const doc = {...(doc[docUnique] as NonNullable<typeof doc['']>)};
+                if (doc) {
+                  doc.overrides = {...doc.overrides};
+                  delete doc.overrides[morpheme];
+                  db.upsert(uniqueToKey(docUnique), () => ({...doc}));
+                  return {...doc, [docUnique]: doc};
+                }
               });
               const fs = overrides[morpheme].map(
                   f => typeof f === 'string' ? f : ce('ruby', null, f.ruby, ce('rt', null, f.rt)));
