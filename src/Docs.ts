@@ -36,6 +36,7 @@ interface RawAnalysis {
   furigana: Furigana[][]; // Furigana[] is a single morpheme, Furigana[][] is an array of morphemes
   hits: ScoreHits[];      // ScoreHits element is result of dictionary analysis starting at a given morpheme
   // furigana.length === hits.length!
+  kanjidic?: Record<string, SimpleCharacter>;
 }
 
 interface AnnotatedHit {
@@ -66,6 +67,13 @@ interface ContextCloze {
   right: string;
 }
 
+interface SimpleCharacter { // from Kanjidic
+  nanori: string[];
+  readings: string[];
+  meanings: string[];
+  literal: string;
+}
+
 /************
 Recoil: atoms & selectors
 ************/
@@ -73,13 +81,14 @@ const docsAtom = Recoil.atom({key: 'docs', default: {} as Docs});
 const docSelector = Recoil.selectorFamily({key: 'doc', get: (unique: string) => ({get}) => get(docsAtom)[unique]});
 
 interface ClickedMorpheme {
-  morpheme?: {rawFurigana: Furigana[], annotatedFurigana?: Furigana[]};
-  morphemeIdx: number                       // for this morpheme
-  rawHits: ScoreHits;                       // for this morpheme
-  lineNumber: number;                       // for this line
-  annotations: AnnotatedAnalysis|undefined; // for this line
-  docUnique: string;                        // for this document
-  overrides: Doc['overrides'];              // for this document
+  morpheme: {rawFurigana: Furigana[], annotatedFurigana?: Furigana[]};
+  morphemeIdx: number;                       // for this morpheme
+  rawHits: ScoreHits;                        // for this morpheme
+  lineNumber: number;                        // for this line
+  annotations: AnnotatedAnalysis|undefined;  // for this line
+  kanjidic: Record<string, SimpleCharacter>; // for this line
+  docUnique: string;                         // for this document
+  overrides: Doc['overrides'];               // for this document
 }
 const clickedMorphemeAtom = Recoil.atom({key: 'clickedMorpheme', default: undefined as undefined | ClickedMorpheme});
 
@@ -259,6 +268,7 @@ function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated, overr
               rawHits: hits[i],
               morpheme: {rawFurigana: rawAnalysis.furigana[i], annotatedFurigana: annotated?.furigana[i]},
               morphemeIdx: i,
+              kanjidic: rawAnalysis.kanjidic || {},
             };
             if (typeof o === 'string') {
               return ce('span', {className: c(i), onClick: () => setClickedHits(fullClick)}, o)
@@ -309,7 +319,8 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
                 sha1: await digestMessage(text, 'sha-1'),
                 text,
                 hits: response.hits,
-                furigana: response.furigana
+                furigana: response.furigana,
+                kanjidic: response.kanjidic,
               });
               annotated.push(undefined);
 
@@ -382,6 +393,7 @@ type v1ResSentence = string|v1ResSentenceAnalyzed;
 interface v1ResSentenceAnalyzed {
   furigana: Furigana[][];
   hits: ScoreHits[];
+  kanjidic: Record<string, SimpleCharacter>;
 }
 
 //
@@ -391,7 +403,7 @@ function HitsComponent({}: HitsProps) {
   const setDocs = Recoil.useSetRecoilState(docsAtom);
   const setClick = Recoil.useSetRecoilState(clickedMorphemeAtom);
   if (!click) { return ce('div', null); }
-  const {rawHits, annotations, lineNumber, docUnique, morphemeIdx} = click;
+  const {rawHits, annotations, lineNumber, docUnique, morphemeIdx, morpheme: {rawFurigana}, kanjidic} = click;
 
   const wordIds: Set<string> = new Set();
   if (annotations) {
@@ -442,6 +454,12 @@ function HitsComponent({}: HitsProps) {
       return ret;
     })
   }
+
+  const kanjihits = furiganaToBase(rawFurigana).split('').filter(c => c in kanjidic).map(c => kanjidic[c]);
+  const kanjiComponent = kanjihits.length
+                             ? ce('div', null, ce('h3', null, 'Kanjidic'),
+                                  ce('ol', null, kanjihits.map(o => ce('li', null, summarizeCharacter(o)))))
+                             : '';
   return ce(
       'div',
       null,
@@ -462,12 +480,17 @@ function HitsComponent({}: HitsProps) {
         // without `key`, we run into this problem
         // https://reactjs.org/blog/2018/06/07/you-probably-dont-need-derived-state.html
       }),
-
+      kanjiComponent,
   );
 }
 function highlight(needle: string|ContextCloze, haystack: string) {
   const needleChars = new Set((typeof needle === 'string' ? needle : needle.cloze).split(''));
   return haystack.split('').map(c => needleChars.has(c) ? ce('span', {className: 'highlighted'}, c) : c);
+}
+export function summarizeCharacter(c: SimpleCharacter) {
+  const {literal, readings, meanings, nanori} = c;
+  return `${literal} ${readings.join('；')} - ${meanings.join('；')}` +
+         (nanori.length ? ` (names: ${nanori.join('；')})` : '');
 }
 
 //
