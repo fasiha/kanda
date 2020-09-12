@@ -36,7 +36,7 @@ interface RawAnalysis {
   furigana: Furigana[][]; // Furigana[] is a single morpheme, Furigana[][] is an array of morphemes
   hits: ScoreHits[];      // ScoreHits element is result of dictionary analysis starting at a given morpheme
   // furigana.length === hits.length!
-  kanjidic?: Record<string, SimpleCharacter>;
+  kanjidic?: Record<string, Kanjidic>;
 }
 
 interface AnnotatedHit {
@@ -67,12 +67,18 @@ interface ContextCloze {
   right: string;
 }
 
+type Kanjidic = SimpleCharacter&{dependencies?: SearchMapped<SimpleCharacter|null>[]};
 interface SimpleCharacter { // from Kanjidic
   nanori: string[];
   readings: string[];
   meanings: string[];
   literal: string;
 }
+type SearchMapped<T> = {
+  node: string,
+  nodeMapped: T,
+  children: SearchMapped<T>[],
+};
 
 /************
 Recoil: atoms & selectors
@@ -82,13 +88,13 @@ const docSelector = Recoil.selectorFamily({key: 'doc', get: (unique: string) => 
 
 interface ClickedMorpheme {
   morpheme: {rawFurigana: Furigana[], annotatedFurigana?: Furigana[]};
-  morphemeIdx: number;                       // for this morpheme
-  rawHits: ScoreHits;                        // for this morpheme
-  lineNumber: number;                        // for this line
-  annotations: AnnotatedAnalysis|undefined;  // for this line
-  kanjidic: Record<string, SimpleCharacter>; // for this line
-  docUnique: string;                         // for this document
-  overrides: Doc['overrides'];               // for this document
+  morphemeIdx: number;                      // for this morpheme
+  rawHits: ScoreHits;                       // for this morpheme
+  lineNumber: number;                       // for this line
+  annotations: AnnotatedAnalysis|undefined; // for this line
+  kanjidic: Record<string, Kanjidic>;       // for this line
+  docUnique: string;                        // for this document
+  overrides: Doc['overrides'];              // for this document
 }
 const clickedMorphemeAtom = Recoil.atom({key: 'clickedMorpheme', default: undefined as undefined | ClickedMorpheme});
 
@@ -393,7 +399,7 @@ type v1ResSentence = string|v1ResSentenceAnalyzed;
 interface v1ResSentenceAnalyzed {
   furigana: Furigana[][];
   hits: ScoreHits[];
-  kanjidic: Record<string, SimpleCharacter>;
+  kanjidic: Record<string, Kanjidic>;
 }
 
 //
@@ -456,10 +462,19 @@ function HitsComponent({}: HitsProps) {
   }
 
   const kanjihits = furiganaToBase(rawFurigana).split('').filter(c => c in kanjidic).map(c => kanjidic[c]);
-  const kanjiComponent = kanjihits.length
-                             ? ce('div', null, ce('h3', null, 'Kanjidic'),
-                                  ce('ol', null, kanjihits.map(o => ce('li', null, summarizeCharacter(o)))))
-                             : '';
+  const kanjiComponent =
+      kanjihits.length
+          ? ce('div', null, ce('h3', null, 'Kanjidic'),
+               ce('ol', null,
+                  kanjihits.map(
+                      o => ce('li', null, summarizeCharacter(o),
+                              o.dependencies?.length
+                                  ? ce('ul', null,
+                                       ...o.dependencies.map(
+                                           dep => ce('li', null,
+                                                     dep.nodeMapped ? summarizeCharacter(dep.nodeMapped) : dep.node)))
+                                  : undefined))))
+          : '';
   return ce(
       'div',
       null,
