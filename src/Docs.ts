@@ -489,8 +489,8 @@ function highlight(needle: string|ContextCloze, haystack: string) {
 }
 export function summarizeCharacter(c: SimpleCharacter) {
   const {literal, readings, meanings, nanori} = c;
-  return `${literal} ${readings.join('；')} - ${meanings.join('；')}` +
-         (nanori.length ? ` (names: ${nanori.join('；')})` : '');
+  return `${literal}： ${readings.join(', ')} ${meanings.join('; ')}` +
+         (nanori.length ? ` (names: ${nanori.join(', ')})` : '');
 }
 
 //
