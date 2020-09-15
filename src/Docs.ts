@@ -85,6 +85,21 @@ Recoil: atoms & selectors
 ************/
 const docsAtom = Recoil.atom({key: 'docs', default: {} as Docs});
 const docSelector = Recoil.selectorFamily({key: 'doc', get: (unique: string) => ({get}) => get(docsAtom)[unique]});
+/** This is expensive to recalculate every time we annotate a hit. Redux would do this better by just mutating. */
+const wordIdToSentenceSelector = Recoil.selectorFamily({
+  key: 'wordIdToSentence',
+  get: (unique: string) => ({get}) => {
+    const wordIdToSentence: Map<string, string[]> = new Map();
+    const doc = get(docSelector(unique));
+    if (!doc || !doc.annotated) { return wordIdToSentence; }
+    for (const [lino, a] of doc.annotated.entries()) {
+      if (!a) { continue; }
+      const line = doc.contents[lino];
+      for (const {wordId} of a.hits) { wordIdToSentence.set(wordId, (wordIdToSentence.get(wordId) || []).concat(line)) }
+    }
+    return wordIdToSentence;
+  }
+});
 
 interface ClickedMorpheme {
   morpheme: {rawFurigana: Furigana[], annotatedFurigana?: Furigana[]};
@@ -409,13 +424,12 @@ function HitsComponent({}: HitsProps) {
   const click = Recoil.useRecoilValue(clickedMorphemeAtom);
   const setDocs = Recoil.useSetRecoilState(docsAtom);
   const setClick = Recoil.useSetRecoilState(clickedMorphemeAtom);
+  const wordIdToSentence = Recoil.useRecoilValue(wordIdToSentenceSelector(click?.docUnique || ''));
+
   if (!click) { return ce('div', null); }
   const {rawHits, annotations, lineNumber, docUnique, morphemeIdx, morpheme: {rawFurigana}, kanjidic} = click;
 
-  const wordIds: Set<string> = new Set();
-  if (annotations) {
-    for (const {wordId, run} of annotations.hits) { wordIds.add(wordId + runToString(run)); }
-  }
+  const wordIds: Set<string> = new Set(annotations?.hits?.map(o => o.wordId + runToString(o.run)));
 
   function onClick(hit: ScoreHit, run: string|ContextCloze, startIdx: number, endIdx: number) {
     setDocs(docs => {
@@ -476,6 +490,27 @@ function HitsComponent({}: HitsProps) {
                                                      dep.nodeMapped ? summarizeCharacter(dep.nodeMapped) : dep.node)))
                                   : undefined))))
           : '';
+
+  const wordIdsShown = new Set(rawHits.results.flatMap(o => o.results.map(o => o.wordId)));
+  const wordIdsChosen = annotations?.hits?.filter(o => wordIdsShown.has(o.wordId)) || [];
+  const usagesComponent =
+      wordIdsChosen.length
+          ? ce(
+                'div',
+                null,
+                ce('h3', null, 'All uses'),
+                ce('ul', null,
+                   ...wordIdsChosen.map(
+                       a => ce(
+                           'li',
+                           null,
+                           a.summary,
+                           ce('ol', null,
+                              ...(wordIdToSentence.get(a.wordId) || []).map(sentence => ce('li', null, sentence))),
+                           ))),
+                )
+          : '';
+
   return ce(
       'div',
       null,
@@ -497,6 +532,7 @@ function HitsComponent({}: HitsProps) {
         // https://reactjs.org/blog/2018/06/07/you-probably-dont-need-derived-state.html
       }),
       kanjiComponent,
+      usagesComponent,
   );
 }
 function highlight(needle: string|ContextCloze, haystack: string) {
