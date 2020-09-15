@@ -41,3 +41,11 @@
   overflow-y: scroll;
   background-color: #5218FA; /* "Han purple" according to https://www.htmlcsscolor.com/hex/5218FA */
 }
+
+a {
+  color: white;
+}
+
+a:hover {
+  text-decoration: none;
+}

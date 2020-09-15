@@ -89,13 +89,15 @@ const docSelector = Recoil.selectorFamily({key: 'doc', get: (unique: string) => 
 const wordIdToSentenceSelector = Recoil.selectorFamily({
   key: 'wordIdToSentence',
   get: (unique: string) => ({get}) => {
-    const wordIdToSentence: Map<string, string[]> = new Map();
+    const wordIdToSentence: Map<string, {sentence: string, lino: number}[]> = new Map();
     const doc = get(docSelector(unique));
     if (!doc || !doc.annotated) { return wordIdToSentence; }
     for (const [lino, a] of doc.annotated.entries()) {
       if (!a) { continue; }
-      const line = doc.contents[lino];
-      for (const {wordId} of a.hits) { wordIdToSentence.set(wordId, (wordIdToSentence.get(wordId) || []).concat(line)) }
+      const sentence = doc.contents[lino];
+      for (const {wordId} of a.hits) {
+        wordIdToSentence.set(wordId, (wordIdToSentence.get(wordId) || []).concat({sentence, lino}))
+      }
     }
     return wordIdToSentence;
   }
@@ -282,7 +284,7 @@ function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated, overr
   const c =
       idxsAnnotated.size > 0 ? ((i: number) => idxsAnnotated.has(i) ? 'annotated-text' : undefined) : () => undefined;
   return ce(
-      'p', null,
+      'p', {id: `${docUnique}-${lineNumber}`},
       ...furigana.map((morpheme, midx) => annotated?.furigana[midx] || overrides[furiganaToBase(morpheme)] || morpheme)
           .flatMap((v, i) => v.map(o => {
             const fullClick = {
@@ -506,7 +508,10 @@ function HitsComponent({}: HitsProps) {
                            null,
                            a.summary,
                            ce('ol', null,
-                              ...(wordIdToSentence.get(a.wordId) || []).map(sentence => ce('li', null, sentence))),
+                              ...(wordIdToSentence.get(a.wordId) || [])
+                                  .map(({sentence, lino}) =>
+                                           ce('li', null,
+                                              ce('a', {href: `#${docUnique}-${lino}`}, abbreviate(a.run, sentence))))),
                            ))),
                 )
           : '';
@@ -534,6 +539,12 @@ function HitsComponent({}: HitsProps) {
       kanjiComponent,
       usagesComponent,
   );
+}
+function abbreviate(needle: string|ContextCloze, full: string): string {
+  const run = runToString(needle);
+  const idx = full.indexOf(run);
+  if (idx < 0) { return full; }
+  return '…' + full.slice(Math.max(0, idx - 5), idx + run.length + 5) + '…';
 }
 function highlight(needle: string|ContextCloze, haystack: string) {
   const needleChars = new Set((typeof needle === 'string' ? needle : needle.cloze).split(''));
