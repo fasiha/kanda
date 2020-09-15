@@ -178,6 +178,7 @@ export function DocsComponent({}: DocsProps) {
       ...Object.keys(docs).map(unique => ce(DocComponent, {unique})),
       ce(AddDocComponent),
       ce(UndeleteComponent),
+      ce(ExportComponent),
   );
   const right = ce(
       'div',
@@ -620,6 +621,21 @@ function OverridesComponent({overrides, docUnique}: OverridesProps) {
               const deleter = ce('button', {onClick}, 'Delete');
               return ce('li', null, `${morpheme} → `, ...fs, ' ', deleter);
             })));
+}
+
+function ExportComponent() {
+  return ce('button', {
+    onClick: async () => {
+      const all = await getDocs();
+      const file = new Blob([JSON.stringify(all)], {type: 'application/json'});
+      const element = document.createElement("a");
+      element.href = URL.createObjectURL(file);
+      element.download = `kanda-${(new Date()).toISOString().replace(/:/g, '.')}.json`;
+      document.body.appendChild(element);
+      element.click();
+    }
+  },
+            'Export');
 }
 
 /************
