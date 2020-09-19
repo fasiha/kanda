@@ -483,7 +483,7 @@ function HitsComponent({}: HitsProps) {
       kanjihits.length
           ? ce('div', null, ce('h3', null, 'Kanjidic'),
                ce('ol', null,
-                  kanjihits.map(
+                  ...kanjihits.map(
                       o => ce('li', null, summarizeCharacter(o),
                               o.dependencies?.length
                                   ? ce('ul', null,
@@ -673,6 +673,7 @@ function OverridesComponent({overrides, docUnique}: OverridesProps) {
 function ExportComponent() {
   return ce('button', {
     onClick: async () => {
+      await db.compact();
       const all = await getDocs();
       const file = new Blob([JSON.stringify(all)], {type: 'application/json'});
       const element = document.createElement("a");
