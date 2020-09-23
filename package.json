@@ -13,7 +13,7 @@
     "pouchdb-upsert": "^2.2.0",
     "react": "^16.13.1",
     "react-dom": "^16.13.1",
-    "recoil": "0.0.10"
+    "recoil": "0.0.13"
   },
   "devDependencies": {
     "@snowpack/app-scripts-react": "^1.8.4",
