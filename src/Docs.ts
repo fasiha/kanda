@@ -1,5 +1,6 @@
 import './Docs.css';
 
+import {default as Automerge} from 'automerge';
 import {createElement as ce, Fragment, useEffect, useState} from 'react';
 import Recoil from 'recoil';
 
@@ -9,15 +10,16 @@ const NLP_SERVER = 'https://curtiz-japanese-nlp.glitch.me/api/v1/sentences';
 Data model
 ************/
 type Docs = Partial<{[unique: string]: Doc}>;
-interface Doc {
+interface InnerDoc {
   name: string;
   unique: string;
-  contents: string[];                         // each element is a line
-  raws: (undefined|RawAnalysis)[];            // each element is a line (a light might be English, so undefined)
-  annotated: (AnnotatedAnalysis|undefined)[]; // each element is a line
+  contents: string[];                    // each element is a line
+  raws: (null|RawAnalysis)[];            // each element is a line (a light might be English, so undefined)
+  annotated: (AnnotatedAnalysis|null)[]; // each element is a line
   // contents.length === raws.length === annotated.length!
   overrides: Record<string, Furigana[]>;
 }
+type Doc = Automerge.FreezeObject<InnerDoc>;
 
 interface Ruby {
   ruby: string;
@@ -27,8 +29,8 @@ type Furigana = string|Ruby;
 interface AnnotatedAnalysis {
   sha1: string;
   text: string;
-  furigana: (Furigana[]|undefined)[]; // overrides for each morpheme
-  hits: AnnotatedHit[];               // hits can span morphemes, so no constraints on this length
+  furigana: (Furigana[]|null)[]; // overrides for each morpheme
+  hits: AnnotatedHit[];          // hits can span morphemes, so no constraints on this length
 }
 interface RawAnalysis {
   sha1: string;
@@ -104,72 +106,54 @@ const wordIdToSentenceSelector = Recoil.selectorFamily({
 });
 
 interface ClickedMorpheme {
-  morpheme: {rawFurigana: Furigana[], annotatedFurigana?: Furigana[]};
-  morphemeIdx: number;                      // for this morpheme
-  rawHits: ScoreHits;                       // for this morpheme
-  lineNumber: number;                       // for this line
-  annotations: AnnotatedAnalysis|undefined; // for this line
-  kanjidic: Record<string, Kanjidic>;       // for this line
-  docUnique: string;                        // for this document
-  overrides: Doc['overrides'];              // for this document
+  morpheme: {rawFurigana: Furigana[], annotatedFurigana: null|Furigana[]};
+  morphemeIdx: number;                 // for this morpheme
+  rawHits: ScoreHits;                  // for this morpheme
+  lineNumber: number;                  // for this line
+  annotations: AnnotatedAnalysis|null; // for this line
+  kanjidic: Record<string, Kanjidic>;  // for this line
+  docUnique: string;                   // for this document
+  overrides: Doc['overrides'];         // for this document
 }
 const clickedMorphemeAtom = Recoil.atom({key: 'clickedMorpheme', default: undefined as undefined | ClickedMorpheme});
 
 /************
-Pouchdb: what lives in the database
+Db: what lives in the database
 ************/
-import PouchDB from 'pouchdb-browser';
-import PouchUpsert from 'pouchdb-upsert';
-PouchDB.plugin(PouchUpsert);
-const db = new PouchDB('sidecar-docs');
+
+import {default as levelup} from 'levelup';
+import {default as leveljs} from 'level-js';
+const db = levelup(leveljs('kanda'));
 
 function uniqueToKey(unique: string) { return `doc-${unique}`; }
-
+function drainStream<T>(stream: NodeJS.ReadableStream): Promise<T[]> {
+  const ret: T[] = [];
+  return new Promise((resolve, reject) => {
+    stream.on('data', x => ret.push(x))
+        .on('error', e => reject(e))
+        .on('close', () => resolve(ret))
+        .on('end', () => resolve(ret));
+  });
+}
 async function getDocs(): Promise<Docs> {
   const startkey = uniqueToKey('');
-  const res = await db.allDocs<Doc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
+  const res: string[] =
+      (await drainStream(db.createValueStream({gte: startkey, lt: startkey + '\ufe0f', valueAsBuffer: false})));
   const ret: Docs = {};
-  for (const {doc} of res.rows) {
-    if (doc) {
-      // `doc` will contain lots of PouchDb keys so lets just rebuild our clean Doc
-      const obj: Doc = {
-        name: doc.name,
-        unique: doc.unique,
-        contents: doc.contents,
-        raws: doc.raws,
-        annotated: doc.annotated,
-        overrides: doc.overrides,
-      };
-      ret[doc.unique] = obj;
-    }
+  for (const x of res) {
+    const doc: NonNullable<Doc> = Automerge.load(x);
+    // check SOME key in doc because this might be a deleted doc (empty object)
+    if (doc.unique) { ret[doc.unique] = doc; }
   }
   return ret
 }
 
-async function deleteDoc(unique: string) { return db.upsert(uniqueToKey(unique), () => ({_deleted: true})); }
-
-async function deletedDocIds(): Promise<string[]> {
-  const ret: string[] = [];
-  return new Promise((resolve, reject) => {
-    db.changes({filter: d => d._deleted})
-        .on('change', c => ret.push(c.id))
-        .on('complete', () => {resolve(ret)})
-        .on('error', e => reject(e));
-  });
-}
-
-async function deletedDocs() {
-  const ids = await deletedDocIds();
-  const pouchDocs = await Promise.all(ids.map(id => db.get(id, {revs: true, open_revs: 'all'}).then(x => {
-    const revs = (x[0].ok as any)._revisions;
-    const lastRev = (revs.start - 1) + '-' + revs.ids[1];
-    const ret = db.get(id, {rev: lastRev}); // with Pouchdb keys too
-    return ret;
-  })));
-  const docs: Doc[] = (pouchDocs as (typeof pouchDocs[0]&Doc)[])
-                          .map(({name, unique, contents, raws, annotated, overrides}: Doc) =>
-                                   ({name, unique, contents, raws, annotated, overrides}));
-  return docs;
+async function deleteDoc(victim: Doc, msg = '') {
+  return db.put(uniqueToKey(victim.unique),
+                Automerge.save(Automerge.change(victim, msg || ('deleting ' + (new Date()).toISOString()), victim => {
+                  Object.keys(victim).forEach(k => delete victim[k as keyof Doc]);
+                  return victim;
+                })));
 }
 
 /************
@@ -194,7 +178,6 @@ export function DocsComponent({}: DocsProps) {
       {id: 'all-docs', className: 'left-containee'},
       ...Object.keys(docs).map(unique => ce(DocComponent, {unique})),
       ce(AddDocComponent),
-      ce(UndeleteComponent),
       ce(ExportComponent),
   );
   const right = ce(
@@ -217,11 +200,11 @@ function DocComponent({unique}: DocProps) {
 
   if (!doc) { return ce(Fragment); }
   const deleteButton = ce('button', {
-    onClick: () => deleteDoc(unique).then(() => setDocs(docs => {
-                                            const ret = {...docs};
-                                            delete ret[unique];
-                                            return ret;
-                                          }))
+    onClick: () => deleteDoc(doc).then(() => setDocs(docs => {
+                                         const ret = {...docs};
+                                         delete ret[unique];
+                                         return ret;
+                                       }))
   },
                           'Delete');
   const editButton = ce('button', {onClick: () => setEditingMode(!editingMode)}, editingMode ? 'Cancel' : 'Edit');
@@ -258,7 +241,7 @@ function AllAnnotationsComponent({doc}: AllAnnotationsProps) {
 //
 interface SentenceProps {
   rawAnalysis: RawAnalysis;
-  annotated: AnnotatedAnalysis|undefined;
+  annotated: AnnotatedAnalysis|null;
   docUnique: string;
   lineNumber: number;
   overrides: Doc['overrides'];
@@ -290,7 +273,7 @@ function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated, overr
             const fullClick = {
               ...click,
               rawHits: hits[i],
-              morpheme: {rawFurigana: rawAnalysis.furigana[i], annotatedFurigana: annotated?.furigana[i]},
+              morpheme: {rawFurigana: rawAnalysis.furigana[i], annotatedFurigana: annotated?.furigana[i] || null},
               morphemeIdx: i,
               kanjidic: rawAnalysis.kanjidic || {},
             };
@@ -319,51 +302,55 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
       const contents = fullText.split('\n');
 
       // Don't resubmit old sentences to server
-      let oldLinesToIdx = new Map(old ? old.contents.map((line, i) => [line, i]) : []);
-      let contentsForServer: string[] = old ? contents.filter(line => !oldLinesToIdx.has(line)) : contents;
-      const res = await fetch(NLP_SERVER, {
-        body: JSON.stringify({sentences: contentsForServer}),
-        headers: {'Content-Type': 'application/json'},
-        method: 'POST',
-      });
-      if (res.ok) {
-        const raws: Doc['raws'] = [];
-        const annotated: Doc['annotated'] = [];
-        const resData: v1ResSentence[] = await res.json();
-        {
-          let resIdx = 0;
-          for (const text of contents) {
-            const hit = oldLinesToIdx.get(text);
-            if (old && hit !== undefined) { // `old` check here is TS pacification: oldLinesToIdx empty if no `old`
-              raws.push(old.raws[hit]);
-              annotated.push(old.annotated[hit]);
-            } else {
-              const response = resData[resIdx];
-              raws.push(typeof response === 'string' ? undefined : {
-                sha1: await digestMessage(text, 'sha-1'),
-                text,
-                hits: response.hits,
-                furigana: response.furigana,
-                kanjidic: response.kanjidic,
-              });
-              annotated.push(undefined);
+      if (old) {
+        throw new Error('unsupported yet')
+        /*
+        let oldLinesToIdx = new Map(old.contents.map((line, i) => [line, i]));
+        let contentsForServer: string[] = contents.filter(line => !oldLinesToIdx.has(line));
+        const res = await fetch(NLP_SERVER, {
+          body: JSON.stringify({sentences: contentsForServer}),
+          headers: {'Content-Type': 'application/json'},
+          method: 'POST',
+        });
 
-              resIdx++;
+        if (res.ok) {
+          Automerge.change(old, 'edited ' + (new Date()).toISOString(), doc => { return doc; })
+          const raws: Doc['raws'] = [];
+          const annotated: Doc['annotated'] = [];
+          const resData: v1ResSentence[] = await res.json();
+          {
+            let resIdx = 0;
+            for (const text of contents) {
+              const hit = oldLinesToIdx.get(text);
+              if (hit !== undefined) {
+                raws.push(old.raws[hit]);
+                annotated.push(old.annotated[hit]);
+              } else {
+                const response = resData[resIdx];
+                raws.push(typeof response === 'string' ? undefined : {
+                  sha1: await digestMessage(text, 'sha-1'),
+                  text,
+                  hits: response.hits,
+                  furigana: response.furigana,
+                  kanjidic: response.kanjidic,
+                });
+                annotated.push(undefined);
+
+                resIdx++;
+              }
             }
           }
-        }
-        const unique = old ? old.unique : (new Date()).toISOString();
+          const unique = old.unique;
 
-        if (!(raws.length === annotated.length && annotated.length === contents.length)) {
-          console.error('Warning: unexpected length of lines vs raw analysis vs annotated analysis',
-                        {raws, annotated, contents});
-        }
-        const newDoc: Doc = {name, unique, contents, raws, annotated, overrides: old ? old.overrides : {}};
-        if (old) {
+          if (!(raws.length === annotated.length && annotated.length === contents.length)) {
+            console.error('Warning: unexpected length of lines vs raw analysis vs annotated analysis',
+                          {raws, annotated, contents});
+          }
+          const doc: Doc = {name, unique, contents, raws, annotated, overrides: old ? old.overrides : {}};
           for (const [lino, oldAnnotated] of old.annotated.entries()) {
-            const newRaw = newDoc.raws[lino];
+            const newRaw = doc.raws[lino];
             const oldRaw = old.raws[lino];
-            if (!oldAnnotated || !newRaw || !oldRaw || newDoc.annotated[lino]) { continue; }
+            if (!oldAnnotated || !newRaw || !oldRaw || doc.annotated[lino]) { continue; }
             // for now, you can only merge LINE TO LINE, so if you add or delete a line with Japanese in the middle of
             // the text, annotations after it won't line up. Skip if we got annotations from old (i.e., line with no
             // change and wasn't reparsed by the server)
@@ -397,15 +384,57 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
                 });
               }
             }
-            newDoc.annotated[lino] = newAnnotated;
+            doc.annotated[lino] = newAnnotated;
           }
+          db.upsert(uniqueToKey(unique), () => doc)
+              .then(() => setDocs(docs => ({...docs, [unique]: doc})))
+              .then(() => done ? done() : '');
+        } else {
+          console.error('error parsing sentences: ' + res.statusText);
         }
-        db.upsert(uniqueToKey(unique), () => newDoc)
-            .then(() => setDocs(docs => ({...docs, [unique]: newDoc})))
-            .then(() => done ? done() : '');
+*/
       } else {
-        console.error('error parsing sentences: ' + res.statusText);
+        // brand new document from scratch
+        const res = await fetch(NLP_SERVER, {
+          body: JSON.stringify({sentences: contents}),
+          headers: {'Content-Type': 'application/json'},
+          method: 'POST',
+        });
+        if (res.ok) {
+          const resData: v1ResSentence[] = await res.json();
+          const annotated: Doc['annotated'] = contents.map(_ => null);
+          const raws: Doc['raws'] = [];
+          for (const [idx, text] of contents.entries()) {
+            const response = resData[idx];
+            raws.push(typeof response === 'string' ? null : {
+              sha1: await digestMessage(text, 'sha-1'),
+              text,
+              hits: response.hits,
+              furigana: response.furigana,
+              kanjidic: response.kanjidic,
+            });
+          }
+          const unique = (new Date()).toISOString();
+          if (!(raws.length === annotated.length && annotated.length === contents.length)) {
+            console.error('Warning: unexpected length of lines vs raw analysis vs annotated analysis',
+                          {raws, annotated, contents});
+          }
+          const newDoc: Doc = Automerge.from({name, unique, contents, raws, annotated, overrides: {}});
+          await db.put(uniqueToKey(unique), Automerge.save(newDoc));
+          setDocs(docs => ({...docs, [unique]: newDoc}));
+          if (done) { done(); }
+        } else {
+          console.error('error parsing sentences: ' + res.statusText);
+        }
       }
+
+      let oldLinesToIdx = new Map(old ? old.contents.map((line, i) => [line, i]) : []);
+      let contentsForServer: string[] = old ? contents.filter(line => !oldLinesToIdx.has(line)) : contents;
+      const res = await fetch(NLP_SERVER, {
+        body: JSON.stringify({sentences: contentsForServer}),
+        headers: {'Content-Type': 'application/json'},
+        method: 'POST',
+      });
     }
   },
                     'Submit');
@@ -434,48 +463,46 @@ function HitsComponent({}: HitsProps) {
   const wordIds: Set<string> = new Set(annotations?.hits?.map(o => o.wordId + runToString(o.run)));
 
   function onClick(hit: ScoreHit, run: string|ContextCloze, startIdx: number, endIdx: number) {
-    setDocs(docs => {
-      // docs is frozen so we have to make copies of everything we want to manipuulate
-      const ret = {...docs}; // shallow-copy object
-      const thisDocOrig = docs[docUnique];
-      if (thisDocOrig) {
-        const thisDoc = {...thisDocOrig};              // shallow-copy object
-        thisDoc.annotated = thisDoc.annotated.slice(); // shallow-copy array, we'll be writing to this
-        const analysis = thisDoc.annotated[lineNumber];
-        if (analysis) {
-          // this line has analysis data
-          const runStr = runToString(run);
-          const hitIdx = analysis.hits.findIndex(o => o.wordId === hit.wordId && runToString(o.run) === runStr);
-          if (hitIdx >= 0) {
-            // annotation exists, remove it
-            const newHits = analysis.hits.slice();                        // shallow-copy array
-            newHits.splice(hitIdx, 1);                                    // delete element in-place
-            thisDoc.annotated[lineNumber] = {...analysis, hits: newHits}; // shallow-copy object
+    let setClicker: Parameters<typeof setClick>[0];
+    setDocs(ret => {
+      const doc = ret[docUnique];
+      if (doc) {
+        const changedDoc = Automerge.change(doc, 'hit ' + (new Date()).toISOString(), doc => {
+          const annotated = doc.annotated[lineNumber];
+          if (annotated) {
+            // this line has analysis data
+            const runStr = runToString(run);
+            const hitIdx = annotated.hits.findIndex(o => o.wordId === hit.wordId && runToString(o.run) === runStr);
+            if (hitIdx >= 0) {
+              // this dictionary entry is annotated for this run: remove it
+              annotated.hits.splice(hitIdx, 1);
+            } else {
+              const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
+              annotated.hits.push(newAnnotatedHit);
+            }
           } else {
+            // no analysis data for this line, so set it up and add this hit
             const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
-            thisDoc.annotated[lineNumber] = {...analysis, hits: analysis.hits.concat(newAnnotatedHit)};
+            doc.annotated[lineNumber] = {
+              furigana: Array.from(Array(doc.raws[lineNumber]?.furigana.length || 0), _ => null),
+              hits: [newAnnotatedHit],
+              sha1: doc.raws[lineNumber]?.sha1 || '',
+              text: doc.raws[lineNumber]?.text || ''
+            };
           }
-        } else {
-          // no analysis data for this line, so set it up and add this hit
-          const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
-          thisDoc.annotated[lineNumber] = {
-            furigana: Array.from(Array(thisDoc.raws[lineNumber]?.furigana.length)),
-            hits: [newAnnotatedHit],
-            sha1: thisDoc.raws[lineNumber]?.sha1 || '',
-            text: thisDoc.raws[lineNumber]?.text || ''
-          };
-        }
-        ret[docUnique] = thisDoc;
+          return doc;
+        });
 
-        // Don't forget to tell our clicked-hits about this
-        setClick(click => click ? {...click, annotations: thisDoc.annotated[lineNumber]} : click);
-
-        // Finally, write to Pouchdb
-        db.upsert(uniqueToKey(docUnique), () => ({...thisDoc}));
-        // Pouchdb will try to mutate is object so shallow-copy
+        // Don't forget to tell our clicked-hits about this. We can't call setClick inside setDocs so save it outside
+        setClicker = (click => click ? {...click, annotations: changedDoc.annotated[lineNumber]} : click);
+        // Finally, write to Leveldb
+        db.put(uniqueToKey(docUnique), Automerge.save(changedDoc));
+        // update global Recoil Docs object, which is frozen, so we have to copy it:
+        return {...ret, [docUnique]: changedDoc};
       }
       return ret;
-    })
+    });
+    if (setClicker) { setClick(setClicker); }
   }
 
   const kanjihits = furiganaToBase(rawFurigana).split('').filter(c => c in kanjidic).map(c => kanjidic[c]);
@@ -596,22 +623,29 @@ function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morpheme
           }
         }
         const oldDoc = docs[docUnique];
-        const raw = oldDoc?.raws[lineNumber];
-        if (oldDoc && raw) {
-          const doc = {...oldDoc};
-          if (global) {
-            doc.overrides = {...doc.overrides, [baseText]: override};
-          } else {
-            doc.annotated = doc.annotated.slice();
-            const annotated: AnnotatedAnalysis =
-                doc.annotated[lineNumber]
-                    ? {...(doc.annotated[lineNumber] as NonNullable<typeof doc.annotated[0]>)}
-                    : {text: raw.text, sha1: raw.sha1, furigana: Array.from(Array(raw.furigana.length)), hits: []};
-            annotated.furigana = annotated.furigana.slice();
-            annotated.furigana[morphemeIdx] = override;
-            doc.annotated[lineNumber] = annotated;
-          }
-          db.upsert(uniqueToKey(docUnique), () => ({...doc}));
+        if (oldDoc) {
+          const doc = Automerge.change(oldDoc, 'override ' + (new Date()).toISOString(), doc => {
+            if (global) {
+              doc.overrides[baseText] = override;
+              return doc;
+            }
+            const raw = doc.raws[lineNumber];
+            if (raw) {
+              // sanity check above, make sure raws isn't undefined for this line (meaning, no Japanese text)
+              const annotated = doc.annotated[lineNumber];
+              if (annotated) {
+                annotated.furigana[morphemeIdx] = override;
+              } else {
+                const newAnnotated: AnnotatedAnalysis =
+                    {text: raw.text, sha1: raw.sha1, furigana: Array.from(Array(raw.furigana.length)), hits: []};
+                newAnnotated.furigana[morphemeIdx] = override;
+                doc.annotated[lineNumber] = newAnnotated;
+              }
+            }
+            return doc;
+          });
+          db.put(uniqueToKey(docUnique), Automerge.save(doc));
+          // docs is frozen so we have to clone
           return {...docs, [docUnique]: doc};
         }
         return docs;
@@ -632,21 +666,6 @@ function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morpheme
 }
 
 //
-function UndeleteComponent() {
-  const setDocs = Recoil.useSetRecoilState(docsAtom);
-  const [deleted, setDeleted] = useState([] as Doc[]);
-  const refreshButton =
-      ce('button', {onClick: () => deletedDocs().then(docs => setDeleted(docs))}, 'Refresh deleted docs');
-  const undelete = (doc: Doc) =>
-      db.upsert(doc.unique, () => doc).then(() => setDocs(docs => ({...docs, [doc.unique]: doc})));
-  return ce(
-      'div', null, ce('h2', null, 'Deleted'), refreshButton,
-      ce('ol', null,
-         ...deleted.map(doc => ce('li', null, `${doc.name} (${doc.unique}): ${doc.contents.join(' ').slice(0, 15)}…`,
-                                  ce('button', {onClick: () => undelete(doc)}, 'Undelete')))));
-}
-
-//
 interface OverridesProps {
   overrides: Doc['overrides'];
   docUnique: string;
@@ -657,11 +676,16 @@ function OverridesComponent({overrides, docUnique}: OverridesProps) {
   if (keys.length === 0) { return ce(Fragment); }
   return ce('div', null, ce('h3', null, 'Overrides'), ce('ol', null, ...keys.map(morpheme => {
               const onClick = () => setter(docs => {
-                const doc = {...(docs[docUnique] as NonNullable<typeof docs['']>)};
-                doc.overrides = {...doc.overrides};
-                delete doc.overrides[morpheme];
-                db.upsert(uniqueToKey(docUnique), () => ({...doc}));
-                return {...docs, [docUnique]: doc};
+                const oldDoc = docs[docUnique];
+                if (oldDoc) {
+                  const doc = Automerge.change(oldDoc, 'removing override ' + (new Date()).toISOString(), doc => {
+                    delete doc.overrides[morpheme];
+                    return doc;
+                  });
+                  db.put(uniqueToKey(docUnique), Automerge.save(doc));
+                  return {...docs, [docUnique]: doc};
+                }
+                return docs;
               });
               const fs = overrides[morpheme].map(
                   f => typeof f === 'string' ? f : ce('ruby', null, f.ruby, ce('rt', null, f.rt)));
@@ -673,7 +697,6 @@ function OverridesComponent({overrides, docUnique}: OverridesProps) {
 function ExportComponent() {
   return ce('button', {
     onClick: async () => {
-      await db.compact();
       const all = await getDocs();
       const file = new Blob([JSON.stringify(all)], {type: 'application/json'});
       const element = document.createElement("a");
