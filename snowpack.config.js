@@ -3,6 +3,8 @@ module.exports = {
   "plugins": [],
   buildOptions: {baseUrl: '/kanda/'},
   installOptions: {
-    rollup: {},
+    rollup: {
+      plugins: [require('rollup-plugin-node-polyfills')()], // needed for PouchDB which imports "events"?
+    },
   },
 };
