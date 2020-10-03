@@ -140,9 +140,9 @@ interface DbDoc {
   sha1s: string[];
 }
 
-function reorder<T extends {sha1: string}>(sortArr: (string|undefined)[], raw: T[]): (T|undefined)[] {
+function reorder<T extends {sha1: string}>(sortArr: string[], raw: T[]): (T|undefined)[] {
   const map = new Map(raw.map(x => [x.sha1, x]));
-  return sortArr.map(s => typeof s === 'string' ? map.get(s) as T : undefined);
+  return sortArr.map(s => map.get(s) as T || undefined);
 }
 
 async function getDocs(): Promise<Docs> {
