@@ -13,6 +13,7 @@ interface Doc {
   name: string;
   unique: string;
   contents: string[];                         // each element is a line
+  sha1s: string[];                            // each element is a line
   raws: (undefined|RawAnalysis)[];            // each element is a line (a light might be English, so undefined)
   annotated: (AnnotatedAnalysis|undefined)[]; // each element is a line
   // contents.length === raws.length === annotated.length!
@@ -123,30 +124,70 @@ import PouchUpsert from 'pouchdb-upsert';
 PouchDB.plugin(PouchUpsert);
 const db = new PouchDB('sidecar-docs');
 
-function uniqueToKey(unique: string) { return `doc-${unique}`; }
+function docUniqueToKey(unique: string) { return `doc-${unique}`; }
+function docLineRawToKey(docUnique: string, lineRaw: RawAnalysis|string) {
+  return `docRaw-${docUnique}-${typeof lineRaw === 'string' ? lineRaw : lineRaw.sha1}`;
+}
+function docLineAnnotatedToKey(docUnique: string, lineAnnotated: AnnotatedAnalysis|string) {
+  return `docAnnotated-${docUnique}-${typeof lineAnnotated === 'string' ? lineAnnotated : lineAnnotated.sha1}`;
+}
+
+interface DbDoc {
+  name: Doc['name'];
+  unique: Doc['unique'];
+  overrides: Doc['overrides'];
+  contents: Doc['contents'];
+  sha1s: string[];
+}
+
+function reorder<T extends {sha1: string}>(sortArr: (string|undefined)[], raw: T[]): (T|undefined)[] {
+  const map = new Map(raw.map(x => [x.sha1, x]));
+  return sortArr.map(s => typeof s === 'string' ? map.get(s) as T : undefined);
+}
 
 async function getDocs(): Promise<Docs> {
-  const startkey = uniqueToKey('');
-  const res = await db.allDocs<Doc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
+  const startkey = docUniqueToKey('');
+  const docsFound = await db.allDocs<DbDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
+
+  const rawsFound = await Promise.all(docsFound.rows.flatMap(doc => {
+    if (!doc.doc) { return []; }
+    const sha1s = doc.doc.sha1s;
+    const startkey = docLineRawToKey(doc.doc.unique, '');
+    return db.allDocs<RawAnalysis>({startkey, endkey: startkey + '\ufe0f', include_docs: true})
+        .then(lines => reorder(sha1s, lines.rows.flatMap(line => line.doc || [])));
+  }));
+  // exact same logic as above except find all docLineAnnotatedToKey/AnnotatedAnalysis docs
+  const annotatedFound = await Promise.all(docsFound.rows.flatMap(doc => {
+    if (!doc.doc) { return []; }
+    const sha1s = doc.doc.sha1s;
+    const startkey = docLineAnnotatedToKey(doc.doc.unique, '');
+    return db.allDocs<AnnotatedAnalysis>({startkey, endkey: startkey + '\ufe0f', include_docs: true})
+        .then(lines => reorder(sha1s, lines.rows.flatMap(line => line.doc || [])));
+  }));
+
   const ret: Docs = {};
-  for (const {doc} of res.rows) {
+  for (const [idx, {doc}] of docsFound.rows.entries()) {
     if (doc) {
       // `doc` will contain lots of PouchDb keys so lets just rebuild our clean Doc
       const obj: Doc = {
         name: doc.name,
         unique: doc.unique,
-        contents: doc.contents,
-        raws: doc.raws,
-        annotated: doc.annotated,
         overrides: doc.overrides,
+        contents: doc.contents,
+        sha1s: doc.sha1s,
+        raws: rawsFound[idx],
+        annotated: annotatedFound[idx],
       };
       ret[doc.unique] = obj;
     }
   }
   return ret
 }
+function doc2dbDoc({name, unique, overrides, contents, sha1s}: Doc): DbDoc {
+  return {name, unique, overrides, contents, sha1s};
+}
 
-async function deleteDoc(unique: string) { return db.upsert(uniqueToKey(unique), () => ({_deleted: true})); }
+async function deleteDoc(unique: string) { return db.upsert(docUniqueToKey(unique), () => ({_deleted: true})); }
 
 async function deletedDocIds(): Promise<string[]> {
   const ret: string[] = [];
@@ -166,9 +207,9 @@ async function deletedDocs() {
     const ret = db.get(id, {rev: lastRev}); // with Pouchdb keys too
     return ret;
   })));
-  const docs: Doc[] = (pouchDocs as (typeof pouchDocs[0]&Doc)[])
-                          .map(({name, unique, contents, raws, annotated, overrides}: Doc) =>
-                                   ({name, unique, contents, raws, annotated, overrides}));
+  const docs: DbDoc[] =
+      (pouchDocs as (typeof pouchDocs[0]&DbDoc)[])
+          .map(({name, unique, contents, sha1s, overrides}: DbDoc) => ({name, unique, contents, sha1s, overrides}));
   return docs;
 }
 
@@ -329,6 +370,7 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
       if (res.ok) {
         const raws: Doc['raws'] = [];
         const annotated: Doc['annotated'] = [];
+        const sha1s: string[] = [];
         const resData: v1ResSentence[] = await res.json();
         {
           let resIdx = 0;
@@ -337,17 +379,19 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
             if (old && hit !== undefined) { // `old` check here is TS pacification: oldLinesToIdx empty if no `old`
               raws.push(old.raws[hit]);
               annotated.push(old.annotated[hit]);
+              sha1s.push(old.sha1s[hit]);
             } else {
               const response = resData[resIdx];
+              const sha1 = await digestMessage(text, 'sha-1');
               raws.push(typeof response === 'string' ? undefined : {
-                sha1: await digestMessage(text, 'sha-1'),
+                sha1,
                 text,
                 hits: response.hits,
                 furigana: response.furigana,
                 kanjidic: response.kanjidic,
               });
               annotated.push(undefined);
-
+              sha1s.push(sha1);
               resIdx++;
             }
           }
@@ -358,7 +402,7 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
           console.error('Warning: unexpected length of lines vs raw analysis vs annotated analysis',
                         {raws, annotated, contents});
         }
-        const newDoc: Doc = {name, unique, contents, raws, annotated, overrides: old ? old.overrides : {}};
+        const newDoc: Doc = {name, unique, contents, sha1s, raws, annotated, overrides: old ? old.overrides : {}};
         if (old) {
           for (const [lino, oldAnnotated] of old.annotated.entries()) {
             const newRaw = newDoc.raws[lino];
@@ -375,7 +419,7 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
             for (const f of oldAnnotated.furigana) {
               if (f) { oldFurigana.set(furiganaToBase(f), f); }
             }
-            newAnnotated.furigana = newRaw.furigana.map(f => oldFurigana.get(furiganaToBase(f)) || f);
+            newAnnotated.furigana = newRaw.furigana.map(f => oldFurigana.get(furiganaToBase(f)) || undefined);
             // now newAnnotated.furigana is valid: we've replaced any base text that we'd overridden before. This could
             // be incorrect: we might have only overridden one instance of a kanji and not another before whereas now
             // we'll have overridden all instances of it.
@@ -400,9 +444,30 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
             newDoc.annotated[lino] = newAnnotated;
           }
         }
-        db.upsert(uniqueToKey(unique), () => newDoc)
-            .then(() => setDocs(docs => ({...docs, [unique]: newDoc})))
-            .then(() => done ? done() : '');
+
+        // Update the doc and all new raw/annotated (i.e., analyses for new lines)
+        // TODO delete no-longer-used raw/annotated analyses. Not urgent: it doesn't really save data until compaction
+        let promises: Promise<any>[] = [db.upsert(docUniqueToKey(unique), () => doc2dbDoc(newDoc))];
+        for (const [idx, content] of newDoc.contents.entries()) {
+          if (!oldLinesToIdx.has(content)) {
+            {
+              const rawKey = docLineRawToKey(unique, newDoc.sha1s[idx]);
+              const rawDoc = newDoc.raws[idx];
+              promises.push(db.upsert(rawKey, () => rawDoc));
+            }
+            {
+              const annotatedKey = docLineAnnotatedToKey(unique, newDoc.sha1s[idx]);
+              const annotated = newDoc.annotated[idx];
+              promises.push(db.upsert(annotatedKey, () => annotated));
+            }
+          }
+        }
+        // Write to local PouchDB, then run extra Recoil/app stuff. Not necessary wait for PouchDB but I prefer to
+        // finish persisting to db before updating UI.
+        Promise.all(promises).then(() => {
+          setDocs(docs => ({...docs, [unique]: newDoc}));
+          if (done) { done(); }
+        });
       } else {
         console.error('error parsing sentences: ' + res.statusText);
       }
@@ -434,6 +499,7 @@ function HitsComponent({}: HitsProps) {
   const wordIds: Set<string> = new Set(annotations?.hits?.map(o => o.wordId + runToString(o.run)));
 
   function onClick(hit: ScoreHit, run: string|ContextCloze, startIdx: number, endIdx: number) {
+    let annotated: AnnotatedAnalysis|undefined;
     setDocs(docs => {
       // docs is frozen so we have to make copies of everything we want to manipuulate
       const ret = {...docs}; // shallow-copy object
@@ -459,7 +525,7 @@ function HitsComponent({}: HitsProps) {
           // no analysis data for this line, so set it up and add this hit
           const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
           thisDoc.annotated[lineNumber] = {
-            furigana: Array.from(Array(thisDoc.raws[lineNumber]?.furigana.length)),
+            furigana: Array.from(Array(thisDoc.raws[lineNumber]?.furigana.length)), // array of undefined
             hits: [newAnnotatedHit],
             sha1: thisDoc.raws[lineNumber]?.sha1 || '',
             text: thisDoc.raws[lineNumber]?.text || ''
@@ -468,14 +534,14 @@ function HitsComponent({}: HitsProps) {
         ret[docUnique] = thisDoc;
 
         // Don't forget to tell our clicked-hits about this
-        setClick(click => click ? {...click, annotations: thisDoc.annotated[lineNumber]} : click);
+        annotated = thisDoc.annotated[lineNumber];
 
-        // Finally, write to Pouchdb
-        db.upsert(uniqueToKey(docUnique), () => ({...thisDoc}));
-        // Pouchdb will try to mutate is object so shallow-copy
+        // Finally, write to Pouchdb, make a copy since PouchDb wants to modify this
+        db.upsert(docLineAnnotatedToKey(docUnique, thisDoc.sha1s[lineNumber]), () => ({...annotated}));
       }
       return ret;
-    })
+    });
+    setClick(click => click ? {...click, annotations: annotated} : click);
   }
 
   const kanjihits = furiganaToBase(rawFurigana).split('').filter(c => c in kanjidic).map(c => kanjidic[c]);
@@ -611,7 +677,7 @@ function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morpheme
             annotated.furigana[morphemeIdx] = override;
             doc.annotated[lineNumber] = annotated;
           }
-          db.upsert(uniqueToKey(docUnique), () => ({...doc}));
+          db.upsert(docUniqueToKey(docUnique), () => doc2dbDoc(doc));
           return {...docs, [docUnique]: doc};
         }
         return docs;
@@ -634,11 +700,11 @@ function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morpheme
 //
 function UndeleteComponent() {
   const setDocs = Recoil.useSetRecoilState(docsAtom);
-  const [deleted, setDeleted] = useState([] as Doc[]);
+  const [deleted, setDeleted] = useState([] as DbDoc[]);
   const refreshButton =
       ce('button', {onClick: () => deletedDocs().then(docs => setDeleted(docs))}, 'Refresh deleted docs');
-  const undelete = (doc: Doc) =>
-      db.upsert(doc.unique, () => doc).then(() => setDocs(docs => ({...docs, [doc.unique]: doc})));
+  const undelete = (doc: DbDoc) =>
+      db.upsert(docUniqueToKey(doc.unique), () => doc).then(() => getDocs()).then(allDocs => setDocs(allDocs));
   return ce(
       'div', null, ce('h2', null, 'Deleted'), refreshButton,
       ce('ol', null,
@@ -660,7 +726,7 @@ function OverridesComponent({overrides, docUnique}: OverridesProps) {
                 const doc = {...(docs[docUnique] as NonNullable<typeof docs['']>)};
                 doc.overrides = {...doc.overrides};
                 delete doc.overrides[morpheme];
-                db.upsert(uniqueToKey(docUnique), () => ({...doc}));
+                db.upsert(docUniqueToKey(docUnique), () => doc2dbDoc(doc));
                 return {...docs, [docUnique]: doc};
               });
               const fs = overrides[morpheme].map(
