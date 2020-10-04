@@ -15,7 +15,7 @@ interface Doc {
   contents: string[];                         // each element is a line
   sha1s: string[];                            // each element is a line
   raws: (undefined|RawAnalysis)[];            // each element is a line (a light might be English, so undefined)
-  annotated: (AnnotatedAnalysis|undefined)[]; // each element is a line
+  annotated: (AnnotatedAnalysis|undefined)[]; // each element is a line (undefined only if raws is undefined)
   // contents.length === raws.length === annotated.length!
   overrides: Record<string, Furigana[]>;
 }
@@ -109,6 +109,7 @@ interface ClickedMorpheme {
   morphemeIdx: number;                      // for this morpheme
   rawHits: ScoreHits;                       // for this morpheme
   lineNumber: number;                       // for this line
+  sha1: string;                             // for thisl ine
   annotations: AnnotatedAnalysis|undefined; // for this line
   kanjidic: Record<string, Kanjidic>;       // for this line
   docUnique: string;                        // for this document
@@ -131,6 +132,10 @@ function docLineRawToKey(docUnique: string, lineRaw: RawAnalysis|string) {
 function docLineAnnotatedToKey(docUnique: string, lineAnnotated: AnnotatedAnalysis|string) {
   return `docAnnotated-${docUnique}-${typeof lineAnnotated === 'string' ? lineAnnotated : lineAnnotated.sha1}`;
 }
+
+function keyIsDoc(key: string) { return key.startsWith('doc-'); }
+function keyIsLineRaw(key: string) { return key.startsWith('docRaw-'); }
+function keyIsLineAnnotated(key: string) { return key.startsWith('docAnnotated-'); }
 
 interface DbDoc {
   name: Doc['name'];
@@ -268,14 +273,20 @@ function DocComponent({unique}: DocProps) {
   const editButton = ce('button', {onClick: () => setEditingMode(!editingMode)}, editingMode ? 'Cancel' : 'Edit');
 
   const overrides = doc.overrides;
-  const editOrRender =
-      editingMode
-          ? ce(AddDocComponent, {existing: doc, done: () => setEditingMode(!editingMode)})
-          : ce('section', null, ...doc.raws.map((raw, i) => {
-              if (!raw) { return ce('p', {onClick: () => setClickedHits(undefined)}, doc.contents[i]); }
-              return ce(SentenceComponent,
-                        {rawAnalysis: raw, annotated: doc.annotated[i], docUnique: unique, lineNumber: i, overrides});
-            }));
+  const editOrRender = editingMode ? ce(AddDocComponent, {existing: doc, done: () => setEditingMode(!editingMode)})
+                                   : ce('section', null, ...doc.raws.map((raw, i) => {
+                                       if (!raw) {
+                                         return ce('p', {onClick: () => setClickedHits(undefined)}, doc.contents[i]);
+                                       }
+                                       return ce(SentenceComponent, {
+                                         rawAnalysis: raw,
+                                         annotated: doc.annotated[i],
+                                         docUnique: unique,
+                                         sha1: doc.sha1s[i],
+                                         lineNumber: i,
+                                         overrides
+                                       });
+                                     }));
 
   return ce(
       'div',
@@ -302,9 +313,10 @@ interface SentenceProps {
   annotated: AnnotatedAnalysis|undefined;
   docUnique: string;
   lineNumber: number;
+  sha1: string;
   overrides: Doc['overrides'];
 }
-function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated, overrides}: SentenceProps) {
+function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated, overrides, sha1}: SentenceProps) {
   const setClickedHits = Recoil.useSetRecoilState(clickedMorphemeAtom);
   const {furigana, hits} = rawAnalysis;
   const click = {
@@ -312,6 +324,7 @@ function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated, overr
     lineNumber,
     annotations: annotated,
     overrides,
+    sha1,
   };
 
   // a morpheme will be in a run or not. It might be in multiple runs. A run is at least one morpheme wide but can span
@@ -390,7 +403,9 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
                 furigana: response.furigana,
                 kanjidic: response.kanjidic,
               });
-              annotated.push(undefined);
+              annotated.push(typeof response === 'string'
+                                 ? undefined
+                                 : {sha1, text, hits: [], furigana: Array.from(Array(response.furigana.length))});
               sha1s.push(sha1);
               resIdx++;
             }
@@ -494,54 +509,41 @@ function HitsComponent({}: HitsProps) {
   const wordIdToSentence = Recoil.useRecoilValue(wordIdToSentenceSelector(click?.docUnique || ''));
 
   if (!click) { return ce('div', null); }
-  const {rawHits, annotations, lineNumber, docUnique, morphemeIdx, morpheme: {rawFurigana}, kanjidic} = click;
+  const {rawHits, annotations, lineNumber, sha1, docUnique, morphemeIdx, morpheme: {rawFurigana}, kanjidic} = click;
 
   const wordIds: Set<string> = new Set(annotations?.hits?.map(o => o.wordId + runToString(o.run)));
 
   function onClick(hit: ScoreHit, run: string|ContextCloze, startIdx: number, endIdx: number) {
-    let annotated: AnnotatedAnalysis|undefined;
-    setDocs(docs => {
-      // docs is frozen so we have to make copies of everything we want to manipuulate
-      const ret = {...docs}; // shallow-copy object
-      const thisDocOrig = docs[docUnique];
-      if (thisDocOrig) {
-        const thisDoc = {...thisDocOrig};              // shallow-copy object
-        thisDoc.annotated = thisDoc.annotated.slice(); // shallow-copy array, we'll be writing to this
-        const analysis = thisDoc.annotated[lineNumber];
-        if (analysis) {
-          // this line has analysis data
-          const runStr = runToString(run);
-          const hitIdx = analysis.hits.findIndex(o => o.wordId === hit.wordId && runToString(o.run) === runStr);
-          if (hitIdx >= 0) {
-            // annotation exists, remove it
-            const newHits = analysis.hits.slice();                        // shallow-copy array
-            newHits.splice(hitIdx, 1);                                    // delete element in-place
-            thisDoc.annotated[lineNumber] = {...analysis, hits: newHits}; // shallow-copy object
-          } else {
-            const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
-            thisDoc.annotated[lineNumber] = {...analysis, hits: analysis.hits.concat(newAnnotatedHit)};
-          }
+    db.upsert<AnnotatedAnalysis>(docLineAnnotatedToKey(docUnique, sha1), pdoc => {
+      if ('furigana' in pdoc) {
+        // this line has analysis data
+        const analysis: AnnotatedAnalysis = pdoc as AnnotatedAnalysis;
+        const runStr = runToString(run);
+        const hitIdx = analysis.hits.findIndex(o => o.wordId === hit.wordId && runToString(o.run) === runStr);
+        if (hitIdx >= 0) {
+          // annotation exists, remove it
+          analysis.hits.splice(hitIdx, 1);
         } else {
-          // no analysis data for this line, so set it up and add this hit
           const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
-          thisDoc.annotated[lineNumber] = {
-            furigana: Array.from(Array(thisDoc.raws[lineNumber]?.furigana.length)), // array of undefined
-            hits: [newAnnotatedHit],
-            sha1: thisDoc.raws[lineNumber]?.sha1 || '',
-            text: thisDoc.raws[lineNumber]?.text || ''
-          };
+          analysis.hits.push(newAnnotatedHit);
         }
-        ret[docUnique] = thisDoc;
 
-        // Don't forget to tell our clicked-hits about this
-        annotated = thisDoc.annotated[lineNumber];
-
-        // Finally, write to Pouchdb, make a copy since PouchDb wants to modify this
-        db.upsert(docLineAnnotatedToKey(docUnique, thisDoc.sha1s[lineNumber]), () => ({...annotated}));
+        setClick(click => click ? {...click, annotations: analysis} : click);
+        setDocs(docs => {
+          // docs is frozen so we have to make copies of everything we want to manipuulate
+          const docOrig = docs[docUnique];
+          if (docOrig) {
+            const doc = {...docOrig};
+            doc.annotated = doc.annotated.map((a, i) => i === lineNumber ? analysis : a);
+            return {...docs, [docUnique]: doc};
+          }
+          return docs;
+        });
+        // return a copy from upsert function because PouchDB will modify it and Recoil gets mad
+        return {...analysis};
       }
-      return ret;
+      return false;
     });
-    setClick(click => click ? {...click, annotations: annotated} : click);
   }
 
   const kanjihits = furiganaToBase(rawFurigana).split('').filter(c => c in kanjidic).map(c => kanjidic[c]);
