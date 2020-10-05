@@ -408,20 +408,22 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
       if (res.ok) {
         const raws: Doc['raws'] = [];
         const annotated: Doc['annotated'] = [];
-        const sha1s: string[] = [];
+        const allSha1s: string[] = [];
+        const newSha1s: string[] = [];
         const resData: v1ResSentence[] = await res.json();
 
         let resIdx = 0;
-        for (const [i, text] of newContents) {
+        for (const text of newContents) {
           const sha1hit = oldLinesToSha1.get(text);
           if (sha1hit) {
-            sha1s.push(sha1hit);
+            allSha1s.push(sha1hit);
             continue;
           }
 
           const response = resData[resIdx++];
           const sha1 = await digestMessage(text, 'sha-1');
-          sha1s.push(sha1);
+          allSha1s.push(sha1);
+          newSha1s.push(sha1);
           if (typeof response === 'string') {
             raws.push(undefined);
             annotated.push(undefined);
@@ -437,9 +439,9 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
           }
         }
 
-        if (!(raws.length === annotated.length && newContents.length === sha1s.length)) {
+        if (!(raws.length === annotated.length && newContents.length === allSha1s.length)) {
           console.error('Warning: unexpected length of new lines vs raw analysis vs annotated analysis',
-                        {newContents, sha1s, linesAdded, raws, annotated});
+                        {newContents, sha1s: allSha1s, linesAdded, raws, annotated});
         }
 
         if (old) {
@@ -504,25 +506,22 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
           }
         }
 
-        const newDoc: DbDoc = {name, unique, contents: newContents, sha1s, overrides: old ? old.overrides : {}};
+        const newDoc:
+            DbDoc = {name, unique, contents: newContents, sha1s: allSha1s, overrides: old ? old.overrides : {}};
 
         // Update the doc and all new raw/annotated (i.e., analyses for new lines)
         // TODO delete no-longer-used raw/annotated analyses. Not urgent: it doesn't really save data until compaction
         let promises: Promise<any>[] = [db.upsert(docUniqueToKey(unique), () => newDoc)];
-        for (const [idx, content] of newDoc.contents.entries()) {
-          if (!oldLinesToSha1.has(content)) {
-            promises.push(db.upsert(docLineRawToKey(unique, newDoc.sha1s[idx]), () => raws[idx]));
-            promises.push(db.upsert(docLineAnnotatedToKey(unique, newDoc.sha1s[idx]), () => annotated[idx]));
-          }
+        for (const [idx, sha1] of newSha1s.entries()) {
+          promises.push(db.upsert(docLineRawToKey(unique, sha1), () => raws[idx]));
+          promises.push(db.upsert(docLineAnnotatedToKey(unique, sha1), () => annotated[idx]));
         }
         // Write to local PouchDB, then run extra Recoil/app stuff. Not necessary wait for PouchDB but I prefer to
         // finish persisting to db before updating UI.
         Promise.all(promises).then(() => {
           setDoc(newDoc);
-          if (!old) {
-            setDocs(docUniques => docUniques.concat(unique));
-            if (done) { done(); }
-          }
+          if (!old) { setDocs(docUniques => docUniques.concat(unique)); }
+          if (done) { done(); }
         });
       } else {
         console.error('error parsing sentences: ' + res.statusText);
