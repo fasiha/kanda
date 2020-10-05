@@ -1,6 +1,6 @@
 import './Docs.css';
 
-import {createElement as ce, Fragment, useEffect, useState} from 'react';
+import {createElement as ce, Fragment, Suspense, useEffect, useState} from 'react';
 import Recoil from 'recoil';
 
 const NLP_SERVER = 'https://curtiz-japanese-nlp.glitch.me/api/v1/sentences';
@@ -275,7 +275,7 @@ export function DocsComponent({}: DocsProps) {
   const right = ce(
       'div',
       {className: 'right-containee'},
-      ce(HitsComponent),
+      ce(Suspense, {fallback: ce('p', null, 'Loading…')}, ce(HitsComponent)),
   );
   return ce('div', {className: 'container'}, left, right);
 }
