@@ -6,8 +6,10 @@ import Recoil from 'recoil';
 
 import {DocsComponent} from './Docs';
 
-ReactDOM.render(ce(React.StrictMode, null, ce(Recoil.RecoilRoot, null, ce(DocsComponent))),
-                document.getElementById('root'))
+ReactDOM.render(
+    ce(React.StrictMode, null,
+       ce(Recoil.RecoilRoot, null, ce(React.Suspense, {fallback: ce('p', null, 'Loading…')}, ce(DocsComponent)))),
+    document.getElementById('root'))
 
 // Hot Module Replacement (HMR) - Remove this snippet to remove HMR.
 // Learn more: https://www.snowpack.dev/#hot-module-replacement

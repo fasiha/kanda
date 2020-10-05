@@ -82,48 +82,21 @@ type SearchMapped<T> = {
 };
 
 /************
-Recoil: atoms & selectors
-************/
-const docsAtom = Recoil.atom({key: 'docs', default: {} as Docs});
-const docSelector = Recoil.selectorFamily({key: 'doc', get: (unique: string) => ({get}) => get(docsAtom)[unique]});
-/** This is expensive to recalculate every time we annotate a hit. Redux would do this better by just mutating. */
-const wordIdToSentenceSelector = Recoil.selectorFamily({
-  key: 'wordIdToSentence',
-  get: (unique: string) => ({get}) => {
-    const wordIdToSentence: Map<string, {sentence: string, lino: number}[]> = new Map();
-    const doc = get(docSelector(unique));
-    if (!doc || !doc.annotated) { return wordIdToSentence; }
-    for (const [lino, a] of doc.annotated.entries()) {
-      if (!a) { continue; }
-      const sentence = doc.contents[lino];
-      for (const {wordId} of a.hits) {
-        wordIdToSentence.set(wordId, (wordIdToSentence.get(wordId) || []).concat({sentence, lino}))
-      }
-    }
-    return wordIdToSentence;
-  }
-});
-
-interface ClickedMorpheme {
-  morpheme: {rawFurigana: Furigana[], annotatedFurigana?: Furigana[]};
-  morphemeIdx: number;                      // for this morpheme
-  rawHits: ScoreHits;                       // for this morpheme
-  lineNumber: number;                       // for this line
-  sha1: string;                             // for thisl ine
-  annotations: AnnotatedAnalysis|undefined; // for this line
-  kanjidic: Record<string, Kanjidic>;       // for this line
-  docUnique: string;                        // for this document
-  overrides: Doc['overrides'];              // for this document
-}
-const clickedMorphemeAtom = Recoil.atom({key: 'clickedMorpheme', default: undefined as undefined | ClickedMorpheme});
-
-/************
 Pouchdb: what lives in the database
 ************/
 import PouchDB from 'pouchdb-browser';
 import PouchUpsert from 'pouchdb-upsert';
 PouchDB.plugin(PouchUpsert);
 const db = new PouchDB('sidecar-docs');
+
+// var remotedb = new PouchDB(`https://gotanda-1.glitch.me/db/kandaSeparate`, {
+//   fetch: (url, opts) => {
+//     opts = opts || {};
+//     opts.credentials = 'include';
+//     return PouchDB.fetch(url, opts);
+//   }
+// });
+// var syncfeed = db.sync(remotedb, {live: true, retry: true});
 
 function docUniqueToKey(unique: string) { return `doc-${unique}`; }
 function docLineRawToKey(docUnique: string, lineRaw: RawAnalysis|string) {
@@ -133,9 +106,7 @@ function docLineAnnotatedToKey(docUnique: string, lineAnnotated: AnnotatedAnalys
   return `docAnnotated-${docUnique}-${typeof lineAnnotated === 'string' ? lineAnnotated : lineAnnotated.sha1}`;
 }
 
-function keyIsDoc(key: string) { return key.startsWith('doc-'); }
-function keyIsLineRaw(key: string) { return key.startsWith('docRaw-'); }
-function keyIsLineAnnotated(key: string) { return key.startsWith('docAnnotated-'); }
+function keyToDocUnique(key: string) { return key.slice(4); }
 
 interface DbDoc {
   name: Doc['name'];
@@ -148,6 +119,12 @@ interface DbDoc {
 function reorder<T extends {sha1: string}>(sortArr: string[], raw: T[]): (T|undefined)[] {
   const map = new Map(raw.map(x => [x.sha1, x]));
   return sortArr.map(s => map.get(s) as T || undefined);
+}
+
+async function getDocUniques(): Promise<string[]> {
+  const startkey = docUniqueToKey('');
+  const res = await db.allDocs<DbDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
+  return res.rows.map(o => o.doc?.unique || keyToDocUnique(o.id));
 }
 
 async function getDocs(): Promise<Docs> {
@@ -188,9 +165,6 @@ async function getDocs(): Promise<Docs> {
   }
   return ret
 }
-function doc2dbDoc({name, unique, overrides, contents, sha1s}: Doc): DbDoc {
-  return {name, unique, overrides, contents, sha1s};
-}
 
 async function deleteDoc(unique: string) { return db.upsert(docUniqueToKey(unique), () => ({_deleted: true})); }
 
@@ -219,17 +193,72 @@ async function deletedDocs() {
 }
 
 /************
+Recoil: atoms & selectors
+************/
+const docUniquesAtom = Recoil.atom({key: 'docs', default: getDocUniques()});
+const docAtomFamily = Recoil.atomFamily({
+  key: 'docUniqueToShas',
+  default: (docUnique: string) => db.get<DbDoc>(docUniqueToKey(docUnique)) as Promise<DbDoc>
+});
+const sha1AtomFamily = Recoil.atomFamily({
+  key: 'sha1RawAnnotated',
+  default: async ([docUnique, sha1]: [string, string]) => {
+    let raw: RawAnalysis;
+    let annotated: AnnotatedAnalysis;
+    try {
+      raw = await db.get<RawAnalysis>(docLineRawToKey(docUnique, sha1));
+      annotated = await db.get<AnnotatedAnalysis>(docLineAnnotatedToKey(docUnique, sha1));
+    } catch { return {raw: undefined, annotated: undefined}; }
+    return {raw, annotated} as {raw: RawAnalysis | undefined, annotated: AnnotatedAnalysis | undefined};
+  }
+});
+const wordIdToSentenceAtomFamily = Recoil.atomFamily({
+  key: 'wordIdToSentence',
+  default: async (unique: string) => {
+    const wordIdToSentence: Map<string, {sentence: string, lino: number}[]> = new Map();
+    if (!unique) { return wordIdToSentence };
+    const doc = await db.get<DbDoc>(docUniqueToKey(unique));
+
+    const startkey = docLineAnnotatedToKey(doc.unique, '');
+    const lines = await db.allDocs<AnnotatedAnalysis>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
+    const annotated: (AnnotatedAnalysis|undefined)[] = reorder(doc.sha1s, lines.rows.flatMap(line => line.doc || []));
+    for (const [lino, a] of annotated.entries()) {
+      if (!a) { continue; }
+      const sentence = doc.contents[lino];
+      for (const {wordId} of a.hits) {
+        wordIdToSentence.set(wordId, (wordIdToSentence.get(wordId) || []).concat({sentence, lino}))
+      }
+    }
+    return wordIdToSentence;
+  }
+});
+
+interface ClickedMorpheme {
+  morpheme: {rawFurigana: Furigana[], annotatedFurigana?: Furigana[]};
+  morphemeIdx: number;                      // for this morpheme
+  rawHits: ScoreHits;                       // for this morpheme
+  lineNumber: number;                       // for this line
+  sha1: string;                             // for this line
+  content: string;                          // for this line
+  annotations: AnnotatedAnalysis|undefined; // for this line
+  kanjidic: Record<string, Kanjidic>;       // for this line
+  docUnique: string;                        // for this document
+  overrides: Doc['overrides'];              // for this document
+}
+const clickedMorphemeAtom = Recoil.atom({key: 'clickedMorpheme', default: undefined as undefined | ClickedMorpheme});
+
+/************
 React components
 ************/
 interface DocsProps {}
 export function DocsComponent({}: DocsProps) {
-  const [docs, setDocs] = Recoil.useRecoilState(docsAtom);
+  const docUniques = Recoil.useRecoilValue(docUniquesAtom);
   const [initialized, setInitialized] = useState(false);
   useEffect(() => {
     if (!initialized) {
       (async () => {
-        const fromdb = await getDocs();
-        if (Object.keys(fromdb).length > 0) { setDocs(fromdb); }
+        // const fromdb = await getDocs();
+        // if (Object.keys(fromdb).length > 0) { setDocs(fromdb); }
         setInitialized(true);
       })();
     }
@@ -238,7 +267,7 @@ export function DocsComponent({}: DocsProps) {
   const left = ce(
       'div',
       {id: 'all-docs', className: 'left-containee'},
-      ...Object.keys(docs).map(unique => ce(DocComponent, {unique})),
+      ...docUniques.map(unique => ce(DocComponent, {unique})),
       ce(AddDocComponent),
       ce(UndeleteComponent),
       ce(ExportComponent),
@@ -256,35 +285,26 @@ interface DocProps {
   unique: string;
 }
 function DocComponent({unique}: DocProps) {
-  const doc = Recoil.useRecoilValue(docSelector(unique));
-  const setDocs = Recoil.useSetRecoilState(docsAtom);
-  const setClickedHits = Recoil.useSetRecoilState(clickedMorphemeAtom);
+  const doc: DbDoc = Recoil.useRecoilValue(docAtomFamily(unique));
+  const setDocUniques = Recoil.useSetRecoilState(docUniquesAtom);
   const [editingMode, setEditingMode] = useState(false);
 
   if (!doc) { return ce(Fragment); }
-  const deleteButton = ce('button', {
-    onClick: () => deleteDoc(unique).then(() => setDocs(docs => {
-                                            const ret = {...docs};
-                                            delete ret[unique];
-                                            return ret;
-                                          }))
-  },
-                          'Delete');
+  const deleteButton =
+      ce('button',
+         {onClick: () => deleteDoc(unique).then(() => setDocUniques(docs => docs.filter(doc => doc !== unique)))},
+         'Delete');
   const editButton = ce('button', {onClick: () => setEditingMode(!editingMode)}, editingMode ? 'Cancel' : 'Edit');
 
   const overrides = doc.overrides;
   const editOrRender = editingMode ? ce(AddDocComponent, {existing: doc, done: () => setEditingMode(!editingMode)})
-                                   : ce('section', null, ...doc.raws.map((raw, i) => {
-                                       if (!raw) {
-                                         return ce('p', {onClick: () => setClickedHits(undefined)}, doc.contents[i]);
-                                       }
+                                   : ce('section', null, ...doc.sha1s.map((sha1, i) => {
                                        return ce(SentenceComponent, {
-                                         rawAnalysis: raw,
-                                         annotated: doc.annotated[i],
                                          docUnique: unique,
-                                         sha1: doc.sha1s[i],
+                                         sha1,
+                                         content: doc.contents[i],
                                          lineNumber: i,
-                                         overrides
+                                         overrides,
                                        });
                                      }));
 
@@ -294,7 +314,7 @@ function DocComponent({unique}: DocProps) {
       ce('h2', null, doc.name || unique, deleteButton, editButton),
       editOrRender,
       ce(OverridesComponent, {overrides: doc.overrides, docUnique: unique}),
-      ce(AllAnnotationsComponent, {doc}),
+      // ce(AllAnnotationsComponent, {doc}),
   )
 }
 
@@ -309,22 +329,24 @@ function AllAnnotationsComponent({doc}: AllAnnotationsProps) {
 
 //
 interface SentenceProps {
-  rawAnalysis: RawAnalysis;
-  annotated: AnnotatedAnalysis|undefined;
   docUnique: string;
   lineNumber: number;
   sha1: string;
+  content: string;
   overrides: Doc['overrides'];
 }
-function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated, overrides, sha1}: SentenceProps) {
+function SentenceComponent({docUnique, lineNumber, overrides, sha1, content}: SentenceProps) {
   const setClickedHits = Recoil.useSetRecoilState(clickedMorphemeAtom);
-  const {furigana, hits} = rawAnalysis;
+  const {raw, annotated} = Recoil.useRecoilValue(sha1AtomFamily([docUnique, sha1]));
+  if (!raw || !annotated) { return ce('p', {onClick: () => setClickedHits(undefined)}, content); }
+  const {furigana, hits} = raw;
   const click = {
     docUnique,
     lineNumber,
     annotations: annotated,
     overrides,
     sha1,
+    content,
   };
 
   // a morpheme will be in a run or not. It might be in multiple runs. A run is at least one morpheme wide but can span
@@ -344,9 +366,9 @@ function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated, overr
             const fullClick = {
               ...click,
               rawHits: hits[i],
-              morpheme: {rawFurigana: rawAnalysis.furigana[i], annotatedFurigana: annotated?.furigana[i]},
+              morpheme: {rawFurigana: raw.furigana[i], annotatedFurigana: annotated?.furigana[i]},
               morphemeIdx: i,
-              kanjidic: rawAnalysis.kanjidic || {},
+              kanjidic: raw.kanjidic || {},
             };
             if (typeof o === 'string') {
               return ce('span', {className: c(i), onClick: () => setClickedHits(fullClick)}, o)
@@ -357,26 +379,29 @@ function SentenceComponent({rawAnalysis, docUnique, lineNumber, annotated, overr
 
 //
 interface AddDocProps {
-  existing?: Doc;
+  existing?: DbDoc;
   done?: () => void;
 }
 function AddDocComponent({existing: old, done}: AddDocProps) {
+  const unique = old ? old.unique : ((new Date()).toISOString() + Math.random().toString(36).slice(2));
+
   const [name, setName] = useState(old ? old.name : '');
   const [fullText, setContents] = useState(old ? old.contents.join('\n') : '');
-  const setDocs = Recoil.useSetRecoilState(docsAtom);
+  const setDocs = Recoil.useSetRecoilState(docUniquesAtom);
+  const setDoc = Recoil.useSetRecoilState(docAtomFamily(unique));
 
   const nameInput = ce('input', {type: 'text', value: name, onChange: e => setName(e.target.value)});
   const contentsInput =
       ce('textarea', {value: fullText, onChange: e => setContents((e.currentTarget as HTMLInputElement).value)});
   const submit = ce('button', {
     onClick: async () => {
-      const contents = fullText.split('\n');
+      const newContents = fullText.split('\n');
 
       // Don't resubmit old sentences to server
-      let oldLinesToIdx = new Map(old ? old.contents.map((line, i) => [line, i]) : []);
-      let contentsForServer: string[] = old ? contents.filter(line => !oldLinesToIdx.has(line)) : contents;
+      const oldLinesToSha1 = new Map(old ? old.contents.map((line, i) => [line, old.sha1s[i]]) : []);
+      const linesAdded = old ? newContents.filter(line => !oldLinesToSha1.has(line)) : newContents;
       const res = await fetch(NLP_SERVER, {
-        body: JSON.stringify({sentences: contentsForServer}),
+        body: JSON.stringify({sentences: linesAdded}),
         headers: {'Content-Type': 'application/json'},
         method: 'POST',
       });
@@ -385,64 +410,84 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
         const annotated: Doc['annotated'] = [];
         const sha1s: string[] = [];
         const resData: v1ResSentence[] = await res.json();
-        {
-          let resIdx = 0;
-          for (const text of contents) {
-            const hit = oldLinesToIdx.get(text);
-            if (old && hit !== undefined) { // `old` check here is TS pacification: oldLinesToIdx empty if no `old`
-              raws.push(old.raws[hit]);
-              annotated.push(old.annotated[hit]);
-              sha1s.push(old.sha1s[hit]);
-            } else {
-              const response = resData[resIdx];
-              const sha1 = await digestMessage(text, 'sha-1');
-              raws.push(typeof response === 'string' ? undefined : {
-                sha1,
-                text,
-                hits: response.hits,
-                furigana: response.furigana,
-                kanjidic: response.kanjidic,
-              });
-              annotated.push(typeof response === 'string'
-                                 ? undefined
-                                 : {sha1, text, hits: [], furigana: Array.from(Array(response.furigana.length))});
-              sha1s.push(sha1);
-              resIdx++;
-            }
+
+        let resIdx = 0;
+        for (const [i, text] of newContents) {
+          const sha1hit = oldLinesToSha1.get(text);
+          if (sha1hit) {
+            sha1s.push(sha1hit);
+            continue;
+          }
+
+          const response = resData[resIdx++];
+          const sha1 = await digestMessage(text, 'sha-1');
+          sha1s.push(sha1);
+          if (typeof response === 'string') {
+            raws.push(undefined);
+            annotated.push(undefined);
+          } else {
+            raws.push({
+              sha1,
+              text,
+              hits: response.hits,
+              furigana: response.furigana,
+              kanjidic: response.kanjidic,
+            });
+            annotated.push({sha1, text, hits: [], furigana: Array.from(Array(response.furigana.length))});
           }
         }
-        const unique = old ? old.unique : (new Date()).toISOString();
 
-        if (!(raws.length === annotated.length && annotated.length === contents.length)) {
-          console.error('Warning: unexpected length of lines vs raw analysis vs annotated analysis',
-                        {raws, annotated, contents});
+        if (!(raws.length === annotated.length && newContents.length === sha1s.length)) {
+          console.error('Warning: unexpected length of new lines vs raw analysis vs annotated analysis',
+                        {newContents, sha1s, linesAdded, raws, annotated});
         }
-        const newDoc: Doc = {name, unique, contents, sha1s, raws, annotated, overrides: old ? old.overrides : {}};
+
         if (old) {
-          for (const [lino, oldAnnotated] of old.annotated.entries()) {
-            const newRaw = newDoc.raws[lino];
-            const oldRaw = old.raws[lino];
-            if (!oldAnnotated || !newRaw || !oldRaw || newDoc.annotated[lino]) { continue; }
-            // for now, you can only merge LINE TO LINE, so if you add or delete a line with Japanese in the middle of
-            // the text, annotations after it won't line up. Skip if we got annotations from old (i.e., line with no
-            // change and wasn't reparsed by the server)
+          // check if there were any dictionary/furigana annotations in the lines that were *deleted* that we can apply
+          // to the lines that were *added*
 
-            const newAnnotated: AnnotatedAnalysis = {sha1: newRaw.sha1, text: newRaw.text, furigana: [], hits: []};
-            // furigana IS INVALID, has to be the same length as # of morphemes!
+          // Setup
+          const annotatedRemoved: AnnotatedAnalysis[] = [];
+          const rawRemoved: RawAnalysis[] = [];
+          const furiganaRemoved: Map<string, Furigana[]> = new Map();
 
-            const oldFurigana: Map<string, Furigana[]> = new Map();
-            for (const f of oldAnnotated.furigana) {
-              if (f) { oldFurigana.set(furiganaToBase(f), f); }
+          {
+            const sha1sRemoved: string[] = [];
+            const newSet = new Set(newContents);
+            for (const [i, oldLine] of old.contents.entries()) {
+              if (!newSet.has(oldLine)) { sha1sRemoved.push(old.sha1s[i]); }
             }
-            newAnnotated.furigana = newRaw.furigana.map(f => oldFurigana.get(furiganaToBase(f)) || undefined);
-            // now newAnnotated.furigana is valid: we've replaced any base text that we'd overridden before. This could
-            // be incorrect: we might have only overridden one instance of a kanji and not another before whereas now
-            // we'll have overridden all instances of it.
+            for (const pdoc of (await db.allDocs<AnnotatedAnalysis>({
+                   keys: sha1sRemoved.map(s => docLineAnnotatedToKey(old.unique, s)),
+                   include_docs: true
+                 })).rows) {
+              if (pdoc.doc) { annotatedRemoved.push(pdoc.doc); }
+            }
+            // same as above but for raws instead of annotated
+            for (const pdoc of (await db.allDocs<RawAnalysis>(
+                                    {keys: sha1sRemoved.map(s => docLineRawToKey(old.unique, s)), include_docs: true}))
+                     .rows) {
+              if (pdoc.doc) { rawRemoved.push(pdoc.doc); }
+            }
+          }
 
-            // now let's see if the old dictionary hits still apply: they SHOULD right?
+          // Add furigana
+          for (const a of annotatedRemoved) {
+            for (const f of a.furigana) {
+              if (f) { furiganaRemoved.set(furiganaToBase(f), f); }
+            }
+          }
+
+          // Add hits
+          const hitsRemoved = annotatedRemoved.flatMap(
+              (o, i) => o.hits.map(
+                  h => ({...h, furigana: rawRemoved[i].furigana.slice(h.startIdx, h.endIdx).map(furiganaToBase)})));
+          for (const [rawidx, newRaw] of raws.entries()) {
+            const newAnnotated = annotated[rawidx];
+            if (!newRaw || !newAnnotated) { continue; }
             const newHaystack = newRaw.furigana.map(furiganaToBase);
-            for (const oldHit of oldAnnotated.hits) {
-              const oldNeedle = oldRaw.furigana.slice(oldHit.startIdx, oldHit.endIdx).map(furiganaToBase);
+            for (const oldHit of hitsRemoved) {
+              const oldNeedle = oldHit.furigana;
               const hit = arraySearch(newHaystack, oldNeedle);
               if (hit >= 0) {
                 const run = simplifyCloze(generateContextClozed(newHaystack.slice(0, hit).join(''), oldNeedle.join(''),
@@ -456,32 +501,28 @@ function AddDocComponent({existing: old, done}: AddDocProps) {
                 });
               }
             }
-            newDoc.annotated[lino] = newAnnotated;
           }
         }
 
+        const newDoc: DbDoc = {name, unique, contents: newContents, sha1s, overrides: old ? old.overrides : {}};
+
         // Update the doc and all new raw/annotated (i.e., analyses for new lines)
         // TODO delete no-longer-used raw/annotated analyses. Not urgent: it doesn't really save data until compaction
-        let promises: Promise<any>[] = [db.upsert(docUniqueToKey(unique), () => doc2dbDoc(newDoc))];
+        let promises: Promise<any>[] = [db.upsert(docUniqueToKey(unique), () => newDoc)];
         for (const [idx, content] of newDoc.contents.entries()) {
-          if (!oldLinesToIdx.has(content)) {
-            {
-              const rawKey = docLineRawToKey(unique, newDoc.sha1s[idx]);
-              const rawDoc = newDoc.raws[idx];
-              promises.push(db.upsert(rawKey, () => rawDoc));
-            }
-            {
-              const annotatedKey = docLineAnnotatedToKey(unique, newDoc.sha1s[idx]);
-              const annotated = newDoc.annotated[idx];
-              promises.push(db.upsert(annotatedKey, () => annotated));
-            }
+          if (!oldLinesToSha1.has(content)) {
+            promises.push(db.upsert(docLineRawToKey(unique, newDoc.sha1s[idx]), () => raws[idx]));
+            promises.push(db.upsert(docLineAnnotatedToKey(unique, newDoc.sha1s[idx]), () => annotated[idx]));
           }
         }
         // Write to local PouchDB, then run extra Recoil/app stuff. Not necessary wait for PouchDB but I prefer to
         // finish persisting to db before updating UI.
         Promise.all(promises).then(() => {
-          setDocs(docs => ({...docs, [unique]: newDoc}));
-          if (done) { done(); }
+          setDoc(newDoc);
+          if (!old) {
+            setDocs(docUniques => docUniques.concat(unique));
+            if (done) { done(); }
+          }
         });
       } else {
         console.error('error parsing sentences: ' + res.statusText);
@@ -503,13 +544,14 @@ interface v1ResSentenceAnalyzed {
 //
 interface HitsProps {}
 function HitsComponent({}: HitsProps) {
-  const click = Recoil.useRecoilValue(clickedMorphemeAtom);
-  const setDocs = Recoil.useSetRecoilState(docsAtom);
-  const setClick = Recoil.useSetRecoilState(clickedMorphemeAtom);
-  const wordIdToSentence = Recoil.useRecoilValue(wordIdToSentenceSelector(click?.docUnique || ''));
+  const [click, setClick] = Recoil.useRecoilState(clickedMorphemeAtom);
+  const setRawAnnot = Recoil.useSetRecoilState(sha1AtomFamily([click?.docUnique || '', click?.sha1 || '']));
+  const [wordIdToSentence, setWordIdToSentence] =
+      Recoil.useRecoilState(wordIdToSentenceAtomFamily(click?.docUnique || ''));
 
   if (!click) { return ce('div', null); }
-  const {rawHits, annotations, lineNumber, sha1, docUnique, morphemeIdx, morpheme: {rawFurigana}, kanjidic} = click;
+  const {rawHits, annotations, lineNumber, sha1, docUnique, morphemeIdx, morpheme: {rawFurigana}, kanjidic, content} =
+      click;
 
   const wordIds: Set<string> = new Set(annotations?.hits?.map(o => o.wordId + runToString(o.run)));
 
@@ -517,30 +559,34 @@ function HitsComponent({}: HitsProps) {
     db.upsert<AnnotatedAnalysis>(docLineAnnotatedToKey(docUnique, sha1), pdoc => {
       if ('furigana' in pdoc) {
         // this line has analysis data
-        const analysis: AnnotatedAnalysis = pdoc as AnnotatedAnalysis;
+        const annotated: AnnotatedAnalysis = pdoc as AnnotatedAnalysis;
         const runStr = runToString(run);
-        const hitIdx = analysis.hits.findIndex(o => o.wordId === hit.wordId && runToString(o.run) === runStr);
+        const hitIdx = annotated.hits.findIndex(o => o.wordId === hit.wordId && runToString(o.run) === runStr);
         if (hitIdx >= 0) {
           // annotation exists, remove it
-          analysis.hits.splice(hitIdx, 1);
+          const deleted = annotated.hits.splice(hitIdx, 1);
+          setWordIdToSentence(map => {
+            const maphit = map.get(deleted[0].wordId);
+            if (!maphit) { return map; }
+            // We just want to remove ONE entry (since we might have multiple usage of a word in a sentencea and we're
+            // just removing one), so we don't want to use `filter`
+            const idxToRemove = maphit.findIndex(o => o.lino === lineNumber);
+            map.set(deleted[0].wordId, maphit.filter((_, i) => i !== idxToRemove));
+            return map;
+          });
         } else {
           const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
-          analysis.hits.push(newAnnotatedHit);
+          annotated.hits.push(newAnnotatedHit);
+          setWordIdToSentence(map => {
+            const maphit = map.get(hit.wordId);
+            return map.set(hit.wordId, (maphit || []).concat({sentence: content, lino: lineNumber}));
+          });
         }
 
-        setClick(click => click ? {...click, annotations: analysis} : click);
-        setDocs(docs => {
-          // docs is frozen so we have to make copies of everything we want to manipuulate
-          const docOrig = docs[docUnique];
-          if (docOrig) {
-            const doc = {...docOrig};
-            doc.annotated = doc.annotated.map((a, i) => i === lineNumber ? analysis : a);
-            return {...docs, [docUnique]: doc};
-          }
-          return docs;
-        });
+        setClick(click => click ? {...click, annotations: annotated} : click);
+        setRawAnnot(({raw}) => ({raw, annotated}));
         // return a copy from upsert function because PouchDB will modify it and Recoil gets mad
-        return {...analysis};
+        return {...annotated};
       }
       return false;
     });
@@ -600,6 +646,7 @@ function HitsComponent({}: HitsProps) {
         docUnique,
         lineNumber,
         morphemeIdx,
+        sha1,
         key: `${docUnique}${lineNumber}${morphemeIdx}`,
         // without `key`, we run into this problem
         // https://reactjs.org/blog/2018/06/07/you-probably-dont-need-derived-state.html
@@ -631,13 +678,15 @@ interface OverrideProps {
   docUnique: string;
   lineNumber: number;
   morphemeIdx: number;
+  sha1: string;
 }
-function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morphemeIdx}: OverrideProps) {
+function OverrideComponent({sha1, morpheme, overrides, docUnique, lineNumber, morphemeIdx}: OverrideProps) {
   const rubys: Ruby[] =
       (morpheme?.annotatedFurigana || morpheme?.rawFurigana || []).filter(s => typeof s !== 'string') as Ruby[];
   const baseText = furiganaToBase(morpheme?.annotatedFurigana || morpheme?.rawFurigana || []);
 
-  const setDocs = Recoil.useSetRecoilState(docsAtom);
+  const setDoc = Recoil.useSetRecoilState(docAtomFamily(docUnique));
+  const setRawAnn = Recoil.useSetRecoilState(sha1AtomFamily([docUnique, sha1]));
   const defaultTexts = rubys.map(o => o.rt);
   const defaultGlobal = baseText in overrides;
   const [texts, setTexts] = useState(defaultTexts);
@@ -655,35 +704,30 @@ function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morpheme
   const label = ce('label', {htmlFor: 'globalCheckbox'}, 'Global override?'); // Just `for` breaks clang-format :-/
   const submit = ce('button', {
     onClick: () => {
-      setDocs(docs => {
-        const override: Furigana[] = [];
-        {
-          let textsIdx = 0;
-          for (const raw of morpheme.rawFurigana) {
-            override.push(typeof raw === 'string' ? raw : {ruby: raw.ruby, rt: texts[textsIdx++]});
-          }
+      const override: Furigana[] = [];
+      {
+        let textsIdx = 0;
+        for (const raw of morpheme.rawFurigana) {
+          override.push(typeof raw === 'string' ? raw : {ruby: raw.ruby, rt: texts[textsIdx++]});
         }
-        const oldDoc = docs[docUnique];
-        const raw = oldDoc?.raws[lineNumber];
-        if (oldDoc && raw) {
-          const doc = {...oldDoc};
-          if (global) {
-            doc.overrides = {...doc.overrides, [baseText]: override};
-          } else {
-            doc.annotated = doc.annotated.slice();
-            const annotated: AnnotatedAnalysis =
-                doc.annotated[lineNumber]
-                    ? {...(doc.annotated[lineNumber] as NonNullable<typeof doc.annotated[0]>)}
-                    : {text: raw.text, sha1: raw.sha1, furigana: Array.from(Array(raw.furigana.length)), hits: []};
-            annotated.furigana = annotated.furigana.slice();
-            annotated.furigana[morphemeIdx] = override;
-            doc.annotated[lineNumber] = annotated;
-          }
-          db.upsert(docUniqueToKey(docUnique), () => doc2dbDoc(doc));
-          return {...docs, [docUnique]: doc};
-        }
-        return docs;
-      })
+      }
+      if (global) {
+        setDoc(doc => ({...doc, overrides: {...doc.overrides, [baseText]: override}}))
+        db.upsert<DbDoc>(docUniqueToKey(docUnique), pdoc => {
+          pdoc.overrides = {...pdoc.overrides, [baseText]: override};
+          return pdoc as DbDoc;
+        });
+      } else {
+        setRawAnn(({raw, annotated}) => {
+          if (!annotated) { return {raw, annotated}; }
+          const newAnnotated: AnnotatedAnalysis = {
+            ...annotated,
+            furigana: annotated.furigana.map((f, i) => i === morphemeIdx ? override : f)
+          };
+          db.upsert<AnnotatedAnalysis>(docLineAnnotatedToKey(docUnique, sha1), () => ({...newAnnotated}));
+          return {raw, annotated: newAnnotated};
+        })
+      }
     }
   },
                     'Submit override');
@@ -701,12 +745,12 @@ function OverrideComponent({morpheme, overrides, docUnique, lineNumber, morpheme
 
 //
 function UndeleteComponent() {
-  const setDocs = Recoil.useSetRecoilState(docsAtom);
+  const setDocs = Recoil.useSetRecoilState(docUniquesAtom);
   const [deleted, setDeleted] = useState([] as DbDoc[]);
   const refreshButton =
       ce('button', {onClick: () => deletedDocs().then(docs => setDeleted(docs))}, 'Refresh deleted docs');
   const undelete = (doc: DbDoc) =>
-      db.upsert(docUniqueToKey(doc.unique), () => doc).then(() => getDocs()).then(allDocs => setDocs(allDocs));
+      db.upsert(docUniqueToKey(doc.unique), () => doc).then(() => getDocUniques()).then(allDocs => setDocs(allDocs));
   return ce(
       'div', null, ce('h2', null, 'Deleted'), refreshButton,
       ce('ol', null,
@@ -720,16 +764,16 @@ interface OverridesProps {
   docUnique: string;
 }
 function OverridesComponent({overrides, docUnique}: OverridesProps) {
-  const setter = Recoil.useSetRecoilState(docsAtom);
+  const setter = Recoil.useSetRecoilState(docAtomFamily(docUnique));
   const keys = Object.keys(overrides);
   if (keys.length === 0) { return ce(Fragment); }
   return ce('div', null, ce('h3', null, 'Overrides'), ce('ol', null, ...keys.map(morpheme => {
-              const onClick = () => setter(docs => {
-                const doc = {...(docs[docUnique] as NonNullable<typeof docs['']>)};
-                doc.overrides = {...doc.overrides};
-                delete doc.overrides[morpheme];
-                db.upsert(docUniqueToKey(docUnique), () => doc2dbDoc(doc));
-                return {...docs, [docUnique]: doc};
+              const onClick = () => db.upsert<DbDoc>(docUniqueToKey(docUnique), pdoc => {
+                const overrides = pdoc.overrides || {};
+                delete overrides[morpheme];
+                pdoc.overrides = overrides;
+                setter(doc => ({...doc, overrides}));
+                return pdoc as DbDoc;
               });
               const fs = overrides[morpheme].map(
                   f => typeof f === 'string' ? f : ce('ruby', null, f.ruby, ce('rt', null, f.rt)));
@@ -773,7 +817,9 @@ function runToString(run: string|ContextCloze): string {
 function furiganaToBase(v: Furigana[]): string { return v.map(o => typeof o === 'string' ? o : o.ruby).join(''); }
 
 /**
- * Like indexOf, but with arrays: all of needle has to match a sub-array of haystack
+ * Like `indexOf`, but with arrays: all of `needle` has to match a sub-array of `haystack`
+ *
+ * Returns index of first hit or -1.
  *
  * N.B., this does not use Boyer-Moore preprocessing and is not optimized.
  * @param haystack big array
