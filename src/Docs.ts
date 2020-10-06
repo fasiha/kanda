@@ -383,7 +383,7 @@ interface AddDocProps {
   done?: () => void;
 }
 function AddDocComponent({existing: old, done}: AddDocProps) {
-  const unique = old ? old.unique : ((new Date()).toISOString() + Math.random().toString(36).slice(2));
+  const unique = old ? old.unique : ((new Date()).toISOString());
 
   const [name, setName] = useState(old ? old.name : '');
   const [fullText, setContents] = useState(old ? old.contents.join('\n') : '');
