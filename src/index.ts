@@ -4,11 +4,10 @@ import React, {createElement as ce} from 'react';
 import ReactDOM from 'react-dom';
 import Recoil from 'recoil';
 
-import {DocsComponent} from './Docs';
+import {DocsComponent} from './DocsMobx';
 
 ReactDOM.render(
-    ce(React.StrictMode, null,
-       ce(Recoil.RecoilRoot, null, ce(React.Suspense, {fallback: ce('p', null, 'Loading…')}, ce(DocsComponent)))),
+    ce(React.StrictMode, null, ce(React.Suspense, {fallback: ce('p', null, 'Loading…')}, ce(DocsComponent))),
     document.getElementById('root'))
 
 // Hot Module Replacement (HMR) - Remove this snippet to remove HMR.
