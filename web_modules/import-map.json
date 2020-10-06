@@ -1,7 +1,5 @@
 {
   "imports": {
-    "io-ts": "./io-ts.js",
-    "io-ts/lib/PathReporter": "./io-ts/lib/PathReporter.js",
     "pouchdb-browser": "./pouchdb-browser.js",
     "pouchdb-upsert": "./pouchdb-upsert.js",
     "react": "./react.js",
