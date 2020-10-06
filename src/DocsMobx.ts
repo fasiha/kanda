@@ -184,7 +184,7 @@ async function deletedDocs() {
 /************
 MobX
 ************/
-import {observable, action, computed, toJS} from "mobx"
+import {observable, action, toJS} from "mobx";
 const docsStore = observable({} as Docs);
 
 interface ClickedMorpheme {
@@ -335,7 +335,10 @@ const HitsComponent = observer(function HitsComponent({}: HitsProps) {
       const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
       doc.annotated[lineNumber]?.hits.push(newAnnotatedHit);
     }
-    db.upsert<AnnotatedAnalysis>(docLineAnnotatedToKey(docUnique, sha1), () => doc.annotated[lineNumber]);
+
+    // not sure whether the dereference inside the closure will trigger something, so store the observable out here
+    const memo = toJS(doc.annotated[lineNumber]);
+    db.upsert<AnnotatedAnalysis>(docLineAnnotatedToKey(docUnique, sha1), () => memo);
   }
 
   const rawFurigana = raw.furigana[morphemeNumber];
@@ -389,21 +392,81 @@ const HitsComponent = observer(function HitsComponent({}: HitsProps) {
                          {onClick: action('hit clicked', () => onClick(result, v.run, rawHits.startIdx, v.endIdx))},
                          highlit ? 'Entry highlighted! Remove?' : 'Create highlight?'));
           }))),
-      // ce(OverrideComponent, {
-      //   morpheme: click.morpheme,
-      //   overrides: click.overrides,
-      //   docUnique,
-      //   lineNumber,
-      //   morphemeIdx,
-      //   sha1,
-      //   key: `${docUnique}${lineNumber}${morphemeIdx}`,
-      //   // without `key`, we run into this problem
-      //   // https://reactjs.org/blog/2018/06/07/you-probably-dont-need-derived-state.html
-      // }),
+      // Need `key` to prevent https://reactjs.org/blog/2018/06/07/you-probably-dont-need-derived-state.html
+      ce(OverrideComponent, {key: `${doc.unique}${lineNumber}${morphemeNumber}`}),
       kanjiComponent,
       usagesComponent,
   );
 });
+
+//
+interface OverrideProps {}
+function OverrideComponent({}: OverrideProps) {
+  const click = clickStore.click;
+  if (!click) { return ce(Fragment); }
+  const {doc, lineNumber, morphemeNumber} = click;
+  const rawFurigana = doc.raws[lineNumber]?.furigana[morphemeNumber] || [];
+  const furigana = doc.annotated[lineNumber]?.furigana[morphemeNumber] || rawFurigana;
+  const rubys: Ruby[] = furigana.filter(s => typeof s !== 'string') as Ruby[];
+  const baseText = furiganaToBase(furigana);
+
+  const defaultTexts = rubys.map(o => o.rt);
+  const defaultGlobal = baseText in doc.overrides;
+  const [texts, setTexts] = useState(defaultTexts);
+  const [global, setGlobal] = useState(defaultGlobal);
+
+  if (rubys.length === 0) { return ce(Fragment); } // `!morpheme` so TS knows it's not undefined
+
+  const inputs = texts.map((text, ridx) => ce('input', {
+                             type: 'text',
+                             value: text,
+                             onChange: e => setTexts(texts.map((text, i) => i === ridx ? e.target.value : text))
+                           }));
+  const checkbox =
+      ce('input', {type: 'checkbox', name: 'globalCheckbox', checked: global, onChange: () => setGlobal(!global)});
+  const label = ce('label', {htmlFor: 'globalCheckbox'}, 'Global override?'); // Just `for` breaks clang-format :-/
+  const submit = ce('button', {
+    onClick: action(() => {
+      const override: Furigana[] = [];
+      {
+        let textsIdx = 0;
+        for (const raw of rawFurigana) {
+          override.push(typeof raw === 'string' ? raw : {ruby: raw.ruby, rt: texts[textsIdx++]});
+        }
+      }
+      if (global) {
+        // setDoc(doc => ({...doc, overrides: {...doc.overrides, [baseText]: override}}))
+        doc.overrides[baseText] = override;
+        db.upsert<DbDoc>(docUniqueToKey(doc.unique), pdoc => {
+          pdoc.overrides = {...pdoc.overrides, [baseText]: override};
+          return pdoc as DbDoc;
+        });
+      } else {
+        const target = doc.annotated[lineNumber]?.furigana || [];
+        target[morphemeNumber] = override;
+        db.upsert<AnnotatedAnalysis>(docLineAnnotatedToKey(doc.unique, doc.sha1s[lineNumber]), ann => {
+          if (ann.furigana) { ann.furigana[morphemeNumber] = override; }
+          return ann as AnnotatedAnalysis;
+        });
+      }
+    })
+  },
+                    'Submit override');
+  const cancel = ce('button', {
+    onClick: () => {
+      setTexts(defaultTexts);
+      setGlobal(defaultGlobal);
+    }
+  },
+                    'Cancel');
+
+  return ce('div', null, ce('h3', null, 'Override for: ' + baseText),
+            ce('ol', null, ...rubys.map((r, i) => ce('li', null, r.ruby + ' ', inputs[i]))), label, checkbox, submit);
+}
+
+/************
+Helper functions
+************/
 function abbreviate(needle: string|ContextCloze, full: string): string {
   const run = runToString(needle);
   const idx = full.indexOf(run);
@@ -420,9 +483,6 @@ export function summarizeCharacter(c: SimpleCharacter) {
          (nanori.length ? ` (names: ${nanori.join(', ')})` : '');
 }
 
-/************
-Helper functions
-************/
 // https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/digest
 async function digestMessage(message: string, algorithm: string) {
   const msgUint8 = new TextEncoder().encode(message);                 // encode as (utf-8) Uint8Array
