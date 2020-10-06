@@ -250,7 +250,7 @@ const DocComponent = observer(function DocComponent({doc}: DocProps) {
       {className: 'doc'},
       ce('h2', null, doc.name || doc.unique, deleteButton, editButton),
       editOrRender,
-      // ce(OverridesComponent, {overrides: doc.overrides, docUnique: unique}),
+      ce(OverridesComponent, {doc}),
       // ce(AllAnnotationsComponent, {doc}),
   )
 });
@@ -462,6 +462,31 @@ function OverrideComponent({}: OverrideProps) {
 
   return ce('div', null, ce('h3', null, 'Override for: ' + baseText),
             ce('ol', null, ...rubys.map((r, i) => ce('li', null, r.ruby + ' ', inputs[i]))), label, checkbox, submit);
+}
+
+//
+interface OverridesProps {
+  doc: Doc;
+}
+function OverridesComponent({doc}: OverridesProps) {
+  const overrides = doc.overrides;
+  const keys = Object.keys(overrides);
+  if (keys.length === 0) { return ce(Fragment); }
+  return ce('div', null, ce('h3', null, 'Overrides'), ce('ol', null, ...keys.map(morpheme => {
+              const onClick = action(() => {
+                delete doc.overrides[morpheme];
+                db.upsert<DbDoc>(docUniqueToKey(doc.unique), pdoc => {
+                  const overrides = pdoc.overrides || {};
+                  delete overrides[morpheme];
+                  pdoc.overrides = overrides;
+                  return pdoc as DbDoc;
+                })
+              });
+              const fs = overrides[morpheme].map(
+                  f => typeof f === 'string' ? f : ce('ruby', null, f.ruby, ce('rt', null, f.rt)));
+              const deleter = ce('button', {onClick}, 'Delete');
+              return ce('li', null, `${morpheme} → `, ...fs, ' ', deleter);
+            })));
 }
 
 /************
