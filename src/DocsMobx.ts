@@ -184,13 +184,21 @@ async function deletedDocs() {
 /************
 MobX
 ************/
-import {observable} from "mobx"
-const docs = observable({} as Docs);
+import {observable, action, computed, toJS} from "mobx"
+const docsStore = observable({} as Docs);
+
+interface ClickedMorpheme {
+  doc: Doc;
+  lineNumber: number;
+  morphemeNumber: number;
+}
+const clickStore = observable({click: undefined} as {click?: ClickedMorpheme});
+
 (async function init() {
   const loaded = await getDocs();
   // TODO should this be in `action`? https://mobx.js.org/actions.html
   for (const [k, v] of Object.entries(loaded)) {
-    docs[k] = v;
+    docsStore[k] = v;
     console.log('loading key: ', k);
   }
 })();
@@ -206,7 +214,7 @@ export const DocsComponent = observer(function DocsComponent({}: DocsProps) {
   const left = ce(
       'div',
       {id: 'all-docs', className: 'left-containee'},
-      ...Object.values(docs).map(doc => ce(DocComponent, {doc})),
+      ...Object.values(docsStore).map(doc => ce(DocComponent, {doc})),
       // ce(AddDocComponent),
       // ce(UndeleteComponent),
       // ce(ExportComponent),
@@ -214,7 +222,7 @@ export const DocsComponent = observer(function DocsComponent({}: DocsProps) {
   const right = ce(
       'div',
       {className: 'right-containee'},
-      // ce(Suspense, {fallback: ce('p', null, 'Loading…')}, ce(HitsComponent)),
+      ce(Suspense, {fallback: ce('p', null, 'Loading…')}, ce(HitsComponent)),
   );
   return ce('div', {className: 'container'}, left, right);
 });
@@ -228,7 +236,7 @@ const DocComponent = observer(function DocComponent({doc}: DocProps) {
 
   if (!doc) { return ce(Fragment); }
   const deleteButton =
-      ce('button', {onClick: () => deleteDoc(doc.unique).then(() => {delete docs[doc.unique]})}, 'Delete');
+      ce('button', {onClick: () => deleteDoc(doc.unique).then(() => {delete docsStore[doc.unique]})}, 'Delete');
   const editButton = ce('button', {onClick: () => setEditingMode(!editingMode)}, editingMode ? 'Cancel' : 'Edit');
 
   const overrides = doc.overrides;
@@ -253,7 +261,6 @@ interface SentenceProps {
   lineNumber: number;
 }
 const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}: SentenceProps) {
-  // const {raw, annotated} = Recoil.useRecoilValue(sha1AtomFamily([docUnique, sha1]));
   const raw = doc.raws[lineNumber];
   const annotated = doc.annotated[lineNumber];
   if (!raw || !annotated) {
@@ -273,25 +280,145 @@ const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}:
   }
   const c =
       idxsAnnotated.size > 0 ? ((i: number) => idxsAnnotated.has(i) ? 'annotated-text' : undefined) : () => undefined;
-  const setClickedHits = (x: any) => {};
   return ce(
       'p', {id: `${doc.unique}-${lineNumber}`},
       ...furigana
           .map((morpheme, midx) => annotated?.furigana[midx] || doc.overrides[furiganaToBase(morpheme)] || morpheme)
           .flatMap((v, i) => v.map(o => {
-            const fullClick = {
-              // ...click,
-              rawHits: hits[i],
-              morpheme: {rawFurigana: raw.furigana[i], annotatedFurigana: annotated?.furigana[i]},
-              morphemeIdx: i,
-              kanjidic: raw.kanjidic || {},
-            };
+            const click: ClickedMorpheme = {doc, lineNumber, morphemeNumber: i};
             if (typeof o === 'string') {
-              return ce('span', {className: c(i), onClick: () => setClickedHits(fullClick)}, o)
+              return ce('span', {className: c(i), onClick: action('clicked string', () => clickStore.click = click)},
+                        o);
             }
-            return ce('ruby', {className: c(i), onClick: () => setClickedHits(fullClick)}, o.ruby, ce('rt', null, o.rt))
+            return ce('ruby', {className: c(i), onClick: action('clicked parsed', () => clickStore.click = click)},
+                      o.ruby, ce('rt', null, o.rt))
           })));
 });
+
+//
+interface HitsProps {}
+const HitsComponent = observer(function HitsComponent({}: HitsProps) {
+  const click = clickStore.click;
+  if (!click) { return ce('div', null); }
+
+  const {doc, lineNumber, morphemeNumber} = click;
+  const raw = doc.raws[lineNumber];
+  const annotations = doc.annotated[lineNumber];
+  if (!raw || !annotations) { return ce('div', null); }
+  const docUnique = doc.unique;
+  const sha1 = doc.sha1s[lineNumber];
+  const rawHits = raw.hits[morphemeNumber];
+
+  const wordIds: Set<string> = new Set(annotations?.hits?.map(o => o.wordId + runToString(o.run)));
+  const wordIdToSentence: Map<string, {sentence: string, lino: number}[]> = new Map();
+  {
+    const wordIds: Set<string> = new Set(annotations?.hits?.map(o => o.wordId));
+    for (const [lino, a] of doc.annotated.entries()) {
+      if (a) {
+        const sentence = doc.contents[lino];
+        const hits = a.hits.filter(h => wordIds.has(h.wordId));
+        for (const {wordId} of hits) {
+          wordIdToSentence.set(wordId, (wordIdToSentence.get(wordId) || []).concat({sentence, lino}))
+        }
+      }
+    }
+  }
+
+  function onClick(hit: ScoreHit, run: string|ContextCloze, startIdx: number, endIdx: number) {
+    const runStr = runToString(run);
+    const hitIdx =
+        doc.annotated[lineNumber]?.hits.findIndex(o => o.wordId === hit.wordId && runToString(o.run) === runStr) ?? -1;
+    // careful above, undefined means we didn't have `annotated[idx]` (stupid TypeScript pacification), -1 means we
+    if (hitIdx >= 0) {
+      const deleted = annotations?.hits.splice(hitIdx, 1);
+    } else {
+      const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
+      doc.annotated[lineNumber]?.hits.push(newAnnotatedHit);
+    }
+    db.upsert<AnnotatedAnalysis>(docLineAnnotatedToKey(docUnique, sha1), () => doc.annotated[lineNumber]);
+  }
+
+  const rawFurigana = raw.furigana[morphemeNumber];
+  const kanjidic = raw.kanjidic || {};
+  const kanjihits = furiganaToBase(rawFurigana).split('').filter(c => c in kanjidic).map(c => kanjidic[c]);
+  const kanjiComponent =
+      kanjihits.length
+          ? ce('div', null, ce('h3', null, 'Kanjidic'),
+               ce('ol', null,
+                  ...kanjihits.map(
+                      o => ce('li', null, summarizeCharacter(o),
+                              o.dependencies?.length
+                                  ? ce('ul', null,
+                                       ...o.dependencies.map(
+                                           dep => ce('li', null,
+                                                     dep.nodeMapped ? summarizeCharacter(dep.nodeMapped) : dep.node)))
+                                  : undefined))))
+          : '';
+
+  const wordIdsShown = new Set(rawHits.results.flatMap(o => o.results.map(o => o.wordId)));
+  const wordIdsChosen = annotations?.hits?.filter(o => wordIdsShown.has(o.wordId)) || [];
+  const usagesComponent =
+      wordIdsChosen.length
+          ? ce(
+                'div',
+                null,
+                ce('h3', null, 'All uses'),
+                ce('ul', null,
+                   ...wordIdsChosen.map(
+                       a => ce(
+                           'li',
+                           null,
+                           a.summary,
+                           ce('ol', null,
+                              ...(wordIdToSentence.get(a.wordId) || [])
+                                  .map(({sentence, lino}) =>
+                                           ce('li', null,
+                                              ce('a', {href: `#${docUnique}-${lino}`}, abbreviate(a.run, sentence))))),
+                           ))),
+                )
+          : '';
+
+  return ce(
+      'div',
+      null,
+      ...rawHits.results.map(
+          v => ce('ol', null, ...v.results.map(result => {
+            const highlit = wordIds.has(result.wordId + runToString(v.run));
+            return ce('li', {className: highlit ? 'annotated-entry' : undefined}, ...highlight(v.run, result.summary),
+                      ce('button',
+                         {onClick: action('hit clicked', () => onClick(result, v.run, rawHits.startIdx, v.endIdx))},
+                         highlit ? 'Entry highlighted! Remove?' : 'Create highlight?'));
+          }))),
+      // ce(OverrideComponent, {
+      //   morpheme: click.morpheme,
+      //   overrides: click.overrides,
+      //   docUnique,
+      //   lineNumber,
+      //   morphemeIdx,
+      //   sha1,
+      //   key: `${docUnique}${lineNumber}${morphemeIdx}`,
+      //   // without `key`, we run into this problem
+      //   // https://reactjs.org/blog/2018/06/07/you-probably-dont-need-derived-state.html
+      // }),
+      kanjiComponent,
+      usagesComponent,
+  );
+});
+function abbreviate(needle: string|ContextCloze, full: string): string {
+  const run = runToString(needle);
+  const idx = full.indexOf(run);
+  if (idx < 0) { return full; }
+  return '…' + full.slice(Math.max(0, idx - 5), idx + run.length + 5) + '…';
+}
+function highlight(needle: string|ContextCloze, haystack: string) {
+  const needleChars = new Set((typeof needle === 'string' ? needle : needle.cloze).split(''));
+  return haystack.split('').map(c => needleChars.has(c) ? ce('span', {className: 'highlighted'}, c) : c);
+}
+export function summarizeCharacter(c: SimpleCharacter) {
+  const {literal, readings, meanings, nanori} = c;
+  return `${literal}： ${readings.join(', ')} ${meanings.join('; ')}` +
+         (nanori.length ? ` (names: ${nanori.join(', ')})` : '');
+}
 
 /************
 Helper functions
