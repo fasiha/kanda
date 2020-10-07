@@ -95,8 +95,6 @@ function docLineAnnotatedToKey(docUnique: string, lineAnnotated: AnnotatedAnalys
   return `docAnnotated-${docUnique}-${typeof lineAnnotated === 'string' ? lineAnnotated : lineAnnotated.sha1}`;
 }
 
-function keyToDocUnique(key: string) { return key.slice(4); }
-
 interface DbDoc {
   name: Doc['name'];
   unique: Doc['unique'];
@@ -108,12 +106,6 @@ interface DbDoc {
 function reorder<T extends {sha1: string}>(sortArr: string[], raw: T[]): (T|undefined)[] {
   const map = new Map(raw.map(x => [x.sha1, x]));
   return sortArr.map(s => map.get(s) as T || undefined);
-}
-
-async function getDocUniques(): Promise<string[]> {
-  const startkey = docUniqueToKey('');
-  const res = await db.allDocs<DbDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
-  return res.rows.map(o => o.doc?.unique || keyToDocUnique(o.id));
 }
 
 /**
