@@ -2,9 +2,8 @@ import './index.css';
 
 import React, {createElement as ce} from 'react';
 import ReactDOM from 'react-dom';
-import Recoil from 'recoil';
 
-import {DocsComponent} from './DocsMobx';
+import {DocsComponent} from './Docs';
 
 ReactDOM.render(
     ce(React.StrictMode, null, ce(React.Suspense, {fallback: ce('p', null, 'Loading…')}, ce(DocsComponent))),
