@@ -216,7 +216,7 @@ export const DocsComponent = observer(function DocsComponent({}: DocsProps) {
       'div',
       {id: 'all-docs', className: 'left-containee'},
       ...Object.values(docsStore).map(doc => ce(DocComponent, {doc})),
-      // ce(AddDocComponent),
+      ce(AddDocComponent),
       // ce(UndeleteComponent),
       // ce(ExportComponent),
   );
@@ -274,7 +274,7 @@ function AddDocComponent({old, done}: AddDocProps) {
   const contentsInput =
       ce('textarea', {value: fullText, onChange: e => setContents((e.currentTarget as HTMLInputElement).value)});
   const submit = ce('button', {
-    onClick: async () => {
+    onClick: action(async () => {
       const newContents = fullText.split('\n');
 
       // Don't resubmit old sentences to server
@@ -286,16 +286,16 @@ function AddDocComponent({old, done}: AddDocProps) {
         method: 'POST',
       });
       if (res.ok) {
+        const resData: v1ResSentence[] = await res.json();
         const raws: Doc['raws'] = [];
         const annotated: Doc['annotated'] = [];
         const sha1s: string[] = [];
-        const resData: v1ResSentence[] = await res.json();
         const addedSha1sToIdx: Map<string, number> = new Map(); // only ones that weren't in old
 
         let resIdx = 0;
         for (const [idx, text] of newContents.entries()) {
           const oldhit = oldLinesToLino.get(text);
-          if (oldhit) {
+          if (oldhit !== undefined) {
             sha1s.push(old?.sha1s[oldhit] || '');
             raws.push(old?.raws[oldhit]);
             annotated.push(old?.annotated[oldhit]);
@@ -336,7 +336,9 @@ function AddDocComponent({old, done}: AddDocProps) {
 
           const baseToFuri: Map<string, Furigana[]> = new Map(); // raw base string->outgoing annotated furigana
           const topToFuri: Map<string, Furigana[]> = new Map();  // raw rt string->outgoing annotated furigana
-          const removedHits: (AnnotatedHit&{furiganaBase: string[]})[] = [];
+          const removedHits: (AnnotatedHit&{furiganaBase: string[], used: boolean})[] = [];
+          // two extra fields above: `furiganaBase` to search new strings for morphemes' bases; and `used` so we track
+          // which hits are reused
           for (const remidx of indexRemoved) {
             for (const [fidx, f] of (old.annotated[remidx]?.furigana || []).entries()) {
               if (f) {
@@ -346,7 +348,7 @@ function AddDocComponent({old, done}: AddDocProps) {
             }
             for (const h of (old.annotated[remidx]?.hits || [])) {
               const furiganaBase = (old.raws[remidx]?.furigana.slice(h.startIdx, h.endIdx) || []).map(furiganaToBase);
-              removedHits.push({...h, furiganaBase});
+              removedHits.push({...h, furiganaBase, used: false});
             }
           }
 
@@ -361,7 +363,7 @@ function AddDocComponent({old, done}: AddDocProps) {
               // reintroduce hits if run present
               const newHaystack = newRaw.furigana.map(furiganaToBase);
               for (const oldHit of removedHits) {
-                if (newContents[addidx].includes(runToBase(oldHit.run))) {
+                if (!oldHit.used && newContents[addidx].includes(runToBase(oldHit.run))) {
                   const oldNeedle = oldHit.furiganaBase;
                   const hit = arraySearch(newHaystack, oldNeedle);
                   if (hit >= 0) {
@@ -375,6 +377,7 @@ function AddDocComponent({old, done}: AddDocProps) {
                       startIdx: hit,
                       endIdx: hit + oldNeedle.length
                     });
+                    oldHit.used = true;
                   }
                 }
               }
@@ -403,7 +406,7 @@ function AddDocComponent({old, done}: AddDocProps) {
       } else {
         console.error('error parsing sentences: ' + res.statusText);
       }
-    }
+    })
   },
                     'Submit');
   return ce('div', null, old ? '' : ce('h2', null, 'Create a new document'), nameInput, ce('br'), contentsInput,
