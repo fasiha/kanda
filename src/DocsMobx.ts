@@ -116,8 +116,12 @@ async function getDocUniques(): Promise<string[]> {
   return res.rows.map(o => o.doc?.unique || keyToDocUnique(o.id));
 }
 
-async function getDocs(): Promise<Docs> {
-  const startkey = docUniqueToKey('');
+/**
+ * Find all or one document
+ * @param singleDocUnique if omitted, get *all* documents
+ */
+async function getDocs(singleDocUnique = ''): Promise<Docs> {
+  const startkey = docUniqueToKey(singleDocUnique);
   const docsFound = await db.allDocs<DbDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
 
   const rawsFound = await Promise.all(docsFound.rows.flatMap(doc => {
@@ -169,12 +173,22 @@ async function deletedDocIds(): Promise<string[]> {
 
 async function deletedDocs() {
   const ids = await deletedDocIds();
-  const pouchDocs = await Promise.all(ids.map(id => db.get(id, {revs: true, open_revs: 'all'}).then(x => {
-    const revs = (x[0].ok as any)._revisions;
-    const lastRev = (revs.start - 1) + '-' + revs.ids[1];
-    const ret = db.get(id, {rev: lastRev}); // with Pouchdb keys too
-    return ret;
-  })));
+  const note = 'No longer able to get deleted document. It may have been compacted during export?';
+  let pouchDocs = await Promise.all(ids.map(id => db.get(id, {revs: true, open_revs: 'all'}).then(x => {
+                                         const revs = (x[0].ok as any)._revisions;
+                                         const lastRev = (revs.start - 1) + '-' + revs.ids[1];
+                                         const ret = db.get(id, {rev: lastRev}); // with Pouchdb keys too
+                                         return ret;
+                                       }))
+                                        .map(promise => promise.catch(e => {
+                                          console.error(note, e);
+                                          return e;
+                                        })));
+  if (pouchDocs.some(x => x instanceof Error)) {
+    alert(note + ' See JavaScript Console for details.');
+    pouchDocs = pouchDocs.filter(o => !(o instanceof Error));
+  }
+  // Above inspired by https://stackoverflow.com/a/46024590/500207
   const docs: DbDoc[] =
       (pouchDocs as (typeof pouchDocs[0]&DbDoc)[])
           .map(({name, unique, contents, sha1s, overrides}: DbDoc) => ({name, unique, contents, sha1s, overrides}));
@@ -194,7 +208,7 @@ interface ClickedMorpheme {
 }
 const clickStore = observable({click: undefined} as {click?: ClickedMorpheme});
 
-(async function init() {
+action(async function init() {
   const loaded = await getDocs();
   // TODO should this be in `action`? https://mobx.js.org/actions.html
   for (const [k, v] of Object.entries(loaded)) {
@@ -207,8 +221,7 @@ const clickStore = observable({click: undefined} as {click?: ClickedMorpheme});
 React components
 ************/
 import {observer} from "mobx-react-lite";
-import {createElement as ce, Fragment, Suspense, useEffect, useState} from 'react';
-import {doc} from 'prettier';
+import {createElement as ce, Fragment, Suspense, useState} from 'react';
 
 interface DocsProps {}
 export const DocsComponent = observer(function DocsComponent({}: DocsProps) {
@@ -217,8 +230,8 @@ export const DocsComponent = observer(function DocsComponent({}: DocsProps) {
       {id: 'all-docs', className: 'left-containee'},
       ...Object.values(docsStore).map(doc => ce(DocComponent, {doc})),
       ce(AddDocComponent),
-      // ce(UndeleteComponent),
-      // ce(ExportComponent),
+      ce(UndeleteComponent),
+      ce(ExportComponent),
   );
   const right = ce(
       'div',
@@ -237,7 +250,8 @@ const DocComponent = observer(function DocComponent({doc}: DocProps) {
 
   if (!doc) { return ce(Fragment); }
   const deleteButton =
-      ce('button', {onClick: () => deleteDoc(doc.unique).then(() => {delete docsStore[doc.unique]})}, 'Delete');
+      ce('button', {onClick: action(() => deleteDoc(doc.unique).then(action(() => {delete docsStore[doc.unique]})))},
+         'Delete');
   const editButton = ce('button', {onClick: () => setEditingMode(!editingMode)}, editingMode ? 'Cancel' : 'Edit');
 
   const editOrRender =
@@ -654,6 +668,39 @@ function OverridesComponent({doc}: OverridesProps) {
               const deleter = ce('button', {onClick}, 'Delete');
               return ce('li', null, `${morpheme} → `, ...fs, ' ', deleter);
             })));
+}
+
+//
+function UndeleteComponent() {
+  // const setDocs = Recoil.useSetRecoilState(docUniquesAtom);
+  const [deleted, setDeleted] = useState([] as DbDoc[]);
+  const refreshButton =
+      ce('button', {onClick: () => deletedDocs().then(docs => setDeleted(docs))}, 'Refresh deleted docs');
+  const undelete = (doc: DbDoc) => db.upsert<DbDoc>(docUniqueToKey(doc.unique), () => doc)
+                                       .then(() => getDocs(doc.unique))
+                                       .then(docs => docsStore[doc.unique] = docs[doc.unique]);
+  return ce(
+      'div', null, ce('h2', null, 'Deleted'), refreshButton,
+      ce('ol', null,
+         ...deleted.map(doc => ce('li', null, `${doc.name} (${doc.unique}): ${doc.contents.join(' ').slice(0, 15)}…`,
+                                  ce('button', {onClick: action(() => undelete(doc))}, 'Undelete')))));
+}
+
+//
+function ExportComponent() {
+  return ce('button', {
+    onClick: async () => {
+      await db.compact();
+      const all = await getDocs();
+      const file = new Blob([JSON.stringify(all)], {type: 'application/json'});
+      const element = document.createElement("a");
+      element.href = URL.createObjectURL(file);
+      element.download = `kanda-${(new Date()).toISOString().replace(/:/g, '.')}.json`;
+      document.body.appendChild(element);
+      element.click();
+    }
+  },
+            'Export');
 }
 
 /************
