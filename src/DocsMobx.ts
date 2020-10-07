@@ -208,6 +208,7 @@ React components
 ************/
 import {observer} from "mobx-react-lite";
 import {createElement as ce, Fragment, Suspense, useEffect, useState} from 'react';
+import {doc} from 'prettier';
 
 interface DocsProps {}
 export const DocsComponent = observer(function DocsComponent({}: DocsProps) {
@@ -239,9 +240,8 @@ const DocComponent = observer(function DocComponent({doc}: DocProps) {
       ce('button', {onClick: () => deleteDoc(doc.unique).then(() => {delete docsStore[doc.unique]})}, 'Delete');
   const editButton = ce('button', {onClick: () => setEditingMode(!editingMode)}, editingMode ? 'Cancel' : 'Edit');
 
-  const overrides = doc.overrides;
   const editOrRender =
-      editingMode ? 'unimplemented' // ce(AddDocComponent, {existing: doc, done: () => setEditingMode(!editingMode)})
+      editingMode ? ce(AddDocComponent, {old: doc, done: () => setEditingMode(!editingMode)})
                   : ce('section', null,
                        ...doc.sha1s.map((_, lineNumber) => { return ce(SentenceComponent, {lineNumber, doc}); }));
 
@@ -254,6 +254,161 @@ const DocComponent = observer(function DocComponent({doc}: DocProps) {
       ce(AllAnnotationsComponent, {doc}),
   )
 });
+
+//
+type v1ResSentence = string|v1ResSentenceAnalyzed;
+interface v1ResSentenceAnalyzed {
+  furigana: Furigana[][];
+  hits: ScoreHits[];
+  kanjidic: Record<string, Kanjidic>;
+}
+interface AddDocProps {
+  old?: Doc;
+  done?: () => void;
+}
+function AddDocComponent({old, done}: AddDocProps) {
+  const [name, setName] = useState(old ? old.name : '');
+  const [fullText, setContents] = useState(old ? old.contents.join('\n') : '');
+
+  const nameInput = ce('input', {type: 'text', value: name, onChange: e => setName(e.target.value)});
+  const contentsInput =
+      ce('textarea', {value: fullText, onChange: e => setContents((e.currentTarget as HTMLInputElement).value)});
+  const submit = ce('button', {
+    onClick: async () => {
+      const newContents = fullText.split('\n');
+
+      // Don't resubmit old sentences to server
+      const oldLinesToLino = new Map(old ? old.contents.map((line, i) => [line, i]) : []);
+      const linesAdded = old ? newContents.filter(line => !oldLinesToLino.has(line)) : newContents;
+      const res = await fetch(NLP_SERVER, {
+        body: JSON.stringify({sentences: linesAdded}),
+        headers: {'Content-Type': 'application/json'},
+        method: 'POST',
+      });
+      if (res.ok) {
+        const raws: Doc['raws'] = [];
+        const annotated: Doc['annotated'] = [];
+        const sha1s: string[] = [];
+        const resData: v1ResSentence[] = await res.json();
+        const addedSha1sToIdx: Map<string, number> = new Map(); // only ones that weren't in old
+
+        let resIdx = 0;
+        for (const [idx, text] of newContents.entries()) {
+          const oldhit = oldLinesToLino.get(text);
+          if (oldhit) {
+            sha1s.push(old?.sha1s[oldhit] || '');
+            raws.push(old?.raws[oldhit]);
+            annotated.push(old?.annotated[oldhit]);
+            continue;
+          }
+
+          const response = resData[resIdx++];
+          const sha1 = await digestMessage(text, 'sha-1');
+          sha1s.push(sha1);
+          addedSha1sToIdx.set(sha1, idx);
+          if (typeof response === 'string') {
+            raws.push(undefined);
+            annotated.push(undefined);
+          } else {
+            raws.push({
+              sha1,
+              text,
+              hits: response.hits,
+              furigana: response.furigana,
+              kanjidic: response.kanjidic,
+            });
+            annotated.push({sha1, text, hits: [], furigana: Array.from(Array(response.furigana.length))});
+          }
+        }
+
+        if (!(raws.length === annotated.length && annotated.length === sha1s.length &&
+              sha1s.length === newContents.length)) {
+          console.error('Warning: unexpected length of new lines vs raw analysis vs annotated analysis',
+                        {newContents, sha1s: sha1s, linesAdded, raws, annotated});
+        }
+
+        if (old) {
+          // check if there were any dictionary/furigana annotations in the lines that were *deleted* that we can apply
+          // to the lines that were *added*
+          const newSha1s = new Set(sha1s);
+          const indexRemoved = new Set(old.sha1s.flatMap((sha1, lino) => newSha1s.has(sha1) ? [] : lino))
+          const indexAdded = new Set(newContents.flatMap((line, lino) => oldLinesToLino.has(line) ? [] : lino))
+
+          const baseToFuri: Map<string, Furigana[]> = new Map(); // raw base string->outgoing annotated furigana
+          const topToFuri: Map<string, Furigana[]> = new Map();  // raw rt string->outgoing annotated furigana
+          const removedHits: (AnnotatedHit&{furiganaBase: string[]})[] = [];
+          for (const remidx of indexRemoved) {
+            for (const [fidx, f] of (old.annotated[remidx]?.furigana || []).entries()) {
+              if (f) {
+                baseToFuri.set(furiganaToBase(f), f);
+                topToFuri.set(furiganaToTop(old.raws[remidx]?.furigana[fidx] || []), f);
+              }
+            }
+            for (const h of (old.annotated[remidx]?.hits || [])) {
+              const furiganaBase = (old.raws[remidx]?.furigana.slice(h.startIdx, h.endIdx) || []).map(furiganaToBase);
+              removedHits.push({...h, furiganaBase});
+            }
+          }
+
+          for (const addidx of indexAdded) {
+            const newAnnotated = annotated[addidx];
+            const newRaw = raws[addidx];
+            if (newAnnotated && newRaw) {
+              // reintroduce furigana if both base and top raws match
+              newAnnotated.furigana =
+                  newRaw.furigana.map(f => (baseToFuri.get(furiganaToBase(f)) && topToFuri.get(furiganaToTop(f))) || f);
+
+              // reintroduce hits if run present
+              const newHaystack = newRaw.furigana.map(furiganaToBase);
+              for (const oldHit of removedHits) {
+                if (newContents[addidx].includes(runToBase(oldHit.run))) {
+                  const oldNeedle = oldHit.furiganaBase;
+                  const hit = arraySearch(newHaystack, oldNeedle);
+                  if (hit >= 0) {
+                    const run =
+                        simplifyCloze(generateContextClozed(newHaystack.slice(0, hit).join(''), oldNeedle.join(''),
+                                                            newHaystack.slice(hit + oldNeedle.length).join('')));
+                    newAnnotated.hits.push({
+                      summary: oldHit.summary,
+                      wordId: oldHit.wordId,
+                      run,
+                      startIdx: hit,
+                      endIdx: hit + oldNeedle.length
+                    });
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        const unique = old ? old.unique : ((new Date()).toISOString());
+        const newDbDoc:
+            DbDoc = {name, unique, contents: newContents, sha1s: sha1s, overrides: old ? old.overrides : {}};
+        const newDoc: Doc = {...newDbDoc, annotated, raws};
+
+        // Update the doc and all new raw/annotated (i.e., analyses for new lines)
+        // TODO delete no-longer-used raw/annotated analyses. Not urgent: it doesn't really save data until compaction
+        let promises: Promise<any>[] = [db.upsert(docUniqueToKey(unique), () => newDbDoc)];
+        for (const [sha1, idx] of addedSha1sToIdx.entries()) {
+          promises.push(db.upsert(docLineRawToKey(unique, sha1), () => raws[idx]));
+          promises.push(db.upsert(docLineAnnotatedToKey(unique, sha1), () => annotated[idx]));
+        }
+        // Write to local PouchDB, then run extra Recoil/app stuff. Not necessary wait for PouchDB but I prefer to
+        // finish persisting to db before updating UI.
+        Promise.all(promises).then(action(() => {
+          docsStore[unique] = newDoc;
+          if (done) { done(); }
+        }));
+      } else {
+        console.error('error parsing sentences: ' + res.statusText);
+      }
+    }
+  },
+                    'Submit');
+  return ce('div', null, old ? '' : ce('h2', null, 'Create a new document'), nameInput, ce('br'), contentsInput,
+            ce('br'), submit);
+}
 
 //
 interface AllAnnotationsProps {
@@ -529,6 +684,7 @@ function runToString(run: string|ContextCloze): string {
 }
 
 function furiganaToBase(v: Furigana[]): string { return v.map(o => typeof o === 'string' ? o : o.ruby).join(''); }
+function furiganaToTop(v: Furigana[]): string { return v.map(o => typeof o === 'string' ? o : o.rt).join(''); }
 
 /**
  * Like `indexOf`, but with arrays: all of `needle` has to match a sub-array of `haystack`
@@ -587,3 +743,4 @@ function generateContextClozed(left: string, cloze: string, right: string): Cont
 }
 
 function simplifyCloze(c: ContextCloze): ContextCloze|string { return (!c.right && !c.left) ? c.cloze : c; }
+function runToBase(run: string|ContextCloze) { return typeof run === 'string' ? run : run.cloze; }
