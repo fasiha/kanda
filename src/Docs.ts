@@ -10,11 +10,12 @@ type Docs = {
 interface Doc {
   name: string;
   unique: string;
-  contents: string[];                         // each element is a line
-  sha1s: string[];                            // each element is a line
-  raws: (undefined|RawAnalysis)[];            // each element is a line (a light might be English, so undefined)
-  annotated: (AnnotatedAnalysis|undefined)[]; // each element is a line (undefined only if raws is undefined)
-  // contents.length === raws.length === annotated.length!
+  contents: string[]; // each element is a line
+  sha1s: string[];
+  // each entry (keyed by sha1) is a line (might be English, so undefined)
+  raws: Record<string, (undefined | RawAnalysis)>;
+  annotated: Record<string, (undefined | AnnotatedAnalysis)>;
+  // Furigana overrides
   overrides: Record<string, Furigana[]>;
 }
 
@@ -87,6 +88,38 @@ import PouchUpsert from 'pouchdb-upsert';
 PouchDB.plugin(PouchUpsert);
 const db = new PouchDB('sidecar-docs');
 
+db.changes({since: 'now', live: true, include_docs: true})
+    .on('change', action(async change => {
+          console.log({change});
+          if (keyIsDocUnique(change.id)) {
+            const dbdoc = change.doc as unknown as DbDoc;
+            if (change.deleted) {
+              const hit = Object.values(docsStore).find(doc => docUniqueToKey(doc.unique) === change.id);
+              if (hit) { delete docsStore[hit.unique]; }
+            } else {
+              const target: Doc|undefined = docsStore[dbdoc.unique];
+              if (target) {
+                target.sha1s = dbdoc.sha1s;
+                target.contents = dbdoc.contents;
+                target.overrides = dbdoc.overrides;
+              } else {
+                docsStore[dbdoc.unique] = (await getDocs(dbdoc.unique))[dbdoc.unique];
+              }
+            }
+          } else if (keyIsDocLineRaw(change.id)) {
+            const raw = change.doc as unknown as RawAnalysis;
+            // find the doc that THIS raw corresponds to. Multiple docs might have the same sha1 but I'd like to keep
+            // them separate
+            const doc = Object.values(docsStore).find(doc => change.id === docLineRawToKey(doc.unique, raw.sha1));
+            if (doc) { doc.raws[raw.sha1] = raw; }
+          } else if (keyIsDocLineAnnotated(change.id)) {
+            const annotated = change.doc as unknown as AnnotatedAnalysis;
+            const doc =
+                Object.values(docsStore).find(doc => change.id === docLineAnnotatedToKey(doc.unique, annotated.sha1));
+            if (doc) { doc.annotated[annotated.sha1] = annotated; }
+          }
+        }));
+
 function docUniqueToKey(unique: string) { return `doc-${unique}`; }
 function docLineRawToKey(docUnique: string, lineRaw: RawAnalysis|string) {
   return `docRaw-${docUnique}-${typeof lineRaw === 'string' ? lineRaw : lineRaw.sha1}`;
@@ -95,17 +128,16 @@ function docLineAnnotatedToKey(docUnique: string, lineAnnotated: AnnotatedAnalys
   return `docAnnotated-${docUnique}-${typeof lineAnnotated === 'string' ? lineAnnotated : lineAnnotated.sha1}`;
 }
 
+function keyIsDocUnique(key: string) { return key.startsWith('doc-'); }
+function keyIsDocLineRaw(key: string) { return key.startsWith('docRaw-'); }
+function keyIsDocLineAnnotated(key: string) { return key.startsWith('docAnnotated-'); }
+
 interface DbDoc {
   name: Doc['name'];
   unique: Doc['unique'];
   overrides: Doc['overrides'];
   contents: Doc['contents'];
   sha1s: string[];
-}
-
-function reorder<T extends {sha1: string}>(sortArr: string[], raw: T[]): (T|undefined)[] {
-  const map = new Map(raw.map(x => [x.sha1, x]));
-  return sortArr.map(s => map.get(s) as T || undefined);
 }
 
 /**
@@ -118,18 +150,30 @@ async function getDocs(singleDocUnique = ''): Promise<Docs> {
 
   const rawsFound = await Promise.all(docsFound.rows.flatMap(doc => {
     if (!doc.doc) { return []; }
+    const u = doc.doc.unique;
     const sha1s = doc.doc.sha1s;
-    const startkey = docLineRawToKey(doc.doc.unique, '');
-    return db.allDocs<RawAnalysis>({startkey, endkey: startkey + '\ufe0f', include_docs: true})
-        .then(lines => reorder(sha1s, lines.rows.flatMap(line => line.doc || [])));
+    return db.allDocs<RawAnalysis>({keys: sha1s.map(sha1 => docLineRawToKey(u, sha1)), include_docs: true})
+        .then(lines => {
+          const ret: Record<string, RawAnalysis> = {};
+          for (const line of lines.rows) {
+            if (line.doc) { ret[line.doc.sha1] = line.doc; }
+          }
+          return ret;
+        });
   }));
   // exact same logic as above except find all docLineAnnotatedToKey/AnnotatedAnalysis docs
   const annotatedFound = await Promise.all(docsFound.rows.flatMap(doc => {
     if (!doc.doc) { return []; }
+    const u = doc.doc.unique;
     const sha1s = doc.doc.sha1s;
-    const startkey = docLineAnnotatedToKey(doc.doc.unique, '');
-    return db.allDocs<AnnotatedAnalysis>({startkey, endkey: startkey + '\ufe0f', include_docs: true})
-        .then(lines => reorder(sha1s, lines.rows.flatMap(line => line.doc || [])));
+    return db.allDocs<AnnotatedAnalysis>({keys: sha1s.map(sha1 => docLineAnnotatedToKey(u, sha1)), include_docs: true})
+        .then(lines => {
+          const ret: Record<string, AnnotatedAnalysis> = {};
+          for (const line of lines.rows) {
+            if (line.doc) { ret[line.doc.sha1] = line.doc; }
+          }
+          return ret;
+        });
   }));
 
   const ret: Docs = {};
@@ -190,7 +234,7 @@ async function deletedDocs() {
 /************
 MobX
 ************/
-import {observable, action, toJS} from "mobx";
+import {observable, action} from "mobx";
 const docsStore = observable({} as Docs);
 
 interface ClickedMorpheme {
@@ -202,7 +246,6 @@ const clickStore = observable({click: undefined} as {click?: ClickedMorpheme});
 
 action(async function init() {
   const loaded = await getDocs();
-  // TODO should this be in `action`? https://mobx.js.org/actions.html
   for (const [k, v] of Object.entries(loaded)) {
     docsStore[k] = v;
     console.log('loading key: ', k);
@@ -241,9 +284,7 @@ const DocComponent = observer(function DocComponent({doc}: DocProps) {
   const [editingMode, setEditingMode] = useState(false);
 
   if (!doc) { return ce(Fragment); }
-  const deleteButton =
-      ce('button', {onClick: action(() => deleteDoc(doc.unique).then(action(() => {delete docsStore[doc.unique]})))},
-         'Delete');
+  const deleteButton = ce('button', {onClick: () => deleteDoc(doc.unique)}, 'Delete');
   const editButton = ce('button', {onClick: () => setEditingMode(!editingMode)}, editingMode ? 'Cancel' : 'Edit');
 
   const editOrRender =
@@ -280,7 +321,7 @@ function AddDocComponent({old, done}: AddDocProps) {
   const contentsInput =
       ce('textarea', {value: fullText, onChange: e => setContents((e.currentTarget as HTMLInputElement).value)});
   const submit = ce('button', {
-    onClick: action(async () => {
+    onClick: (async () => {
       const newContents = fullText.split('\n');
 
       // Don't resubmit old sentences to server
@@ -293,18 +334,20 @@ function AddDocComponent({old, done}: AddDocProps) {
       });
       if (res.ok) {
         const resData: v1ResSentence[] = await res.json();
-        const raws: Doc['raws'] = [];
-        const annotated: Doc['annotated'] = [];
-        const sha1s: string[] = [];
+        const raws: Doc['raws'] = {};
+        const annotated: Doc['annotated'] = {};
+        const sha1s: string[] = [];                             // should be same length as newContents
         const addedSha1sToIdx: Map<string, number> = new Map(); // only ones that weren't in old
 
         let resIdx = 0;
         for (const [idx, text] of newContents.entries()) {
+          // some of these might be in `old`
           const oldhit = oldLinesToLino.get(text);
           if (oldhit !== undefined) {
-            sha1s.push(old?.sha1s[oldhit] || '');
-            raws.push(old?.raws[oldhit]);
-            annotated.push(old?.annotated[oldhit]);
+            const sha1 = old?.sha1s[oldhit] || '';
+            sha1s.push(sha1);
+            raws[sha1] = old?.raws[oldhit];
+            annotated[sha1] = old?.annotated[oldhit];
             continue;
           }
 
@@ -312,25 +355,20 @@ function AddDocComponent({old, done}: AddDocProps) {
           const sha1 = await digestMessage(text, 'sha-1');
           sha1s.push(sha1);
           addedSha1sToIdx.set(sha1, idx);
-          if (typeof response === 'string') {
-            raws.push(undefined);
-            annotated.push(undefined);
-          } else {
-            raws.push({
+          if (typeof response !== 'string') {
+            raws[sha1] = {
               sha1,
               text,
               hits: response.hits,
               furigana: response.furigana,
               kanjidic: response.kanjidic,
-            });
-            annotated.push({sha1, text, hits: [], furigana: Array.from(Array(response.furigana.length))});
+            };
+            annotated[sha1] = {sha1, text, hits: [], furigana: Array.from(Array(response.furigana.length))};
           }
         }
 
-        if (!(raws.length === annotated.length && annotated.length === sha1s.length &&
-              sha1s.length === newContents.length)) {
-          console.error('Warning: unexpected length of new lines vs raw analysis vs annotated analysis',
-                        {newContents, sha1s: sha1s, linesAdded, raws, annotated});
+        if (sha1s.length !== newContents.length) {
+          console.error('Mismatch between lines and sha1s', {sha1s, newContents});
         }
 
         if (old) {
@@ -339,6 +377,7 @@ function AddDocComponent({old, done}: AddDocProps) {
           const newSha1s = new Set(sha1s);
           const indexRemoved = new Set(old.sha1s.flatMap((sha1, lino) => newSha1s.has(sha1) ? [] : lino))
           const indexAdded = new Set(newContents.flatMap((line, lino) => oldLinesToLino.has(line) ? [] : lino))
+          // Above: indexes correspond to `sha1s` and `newContents`, i.e., line number in new text
 
           const baseToFuri: Map<string, Furigana[]> = new Map(); // raw base string->outgoing annotated furigana
           const topToFuri: Map<string, Furigana[]> = new Map();  // raw rt string->outgoing annotated furigana
@@ -359,8 +398,8 @@ function AddDocComponent({old, done}: AddDocProps) {
           }
 
           for (const addidx of indexAdded) {
-            const newAnnotated = annotated[addidx];
-            const newRaw = raws[addidx];
+            const newAnnotated = annotated[sha1s[addidx]];
+            const newRaw = raws[sha1s[addidx]];
             if (newAnnotated && newRaw) {
               // reintroduce furigana if both base and top raws match
               newAnnotated.furigana =
@@ -394,21 +433,19 @@ function AddDocComponent({old, done}: AddDocProps) {
         const unique = old ? old.unique : ((new Date()).toISOString());
         const newDbDoc:
             DbDoc = {name, unique, contents: newContents, sha1s: sha1s, overrides: old ? old.overrides : {}};
-        const newDoc: Doc = {...newDbDoc, annotated, raws};
 
         // Update the doc and all new raw/annotated (i.e., analyses for new lines)
         // TODO delete no-longer-used raw/annotated analyses. Not urgent: it doesn't really save data until compaction
         let promises: Promise<any>[] = [db.upsert(docUniqueToKey(unique), () => newDbDoc)];
-        for (const [sha1, idx] of addedSha1sToIdx.entries()) {
-          promises.push(db.upsert(docLineRawToKey(unique, sha1), () => raws[idx]));
-          promises.push(db.upsert(docLineAnnotatedToKey(unique, sha1), () => annotated[idx]));
+        for (const sha1 of addedSha1sToIdx.keys()) {
+          promises.push(db.upsert(docLineRawToKey(unique, sha1), () => raws[sha1]));
+          promises.push(db.upsert(docLineAnnotatedToKey(unique, sha1), () => annotated[sha1]));
         }
         // Write to local PouchDB, then run extra app stuff. Not necessary wait for PouchDB but I prefer to
         // finish persisting to db before updating UI.
-        Promise.all(promises).then(action(() => {
-          docsStore[unique] = newDoc;
+        Promise.all(promises).then(() => {
           if (done) { done(); }
-        }));
+        });
       } else {
         console.error('error parsing sentences: ' + res.statusText);
       }
@@ -424,8 +461,9 @@ interface AllAnnotationsProps {
   doc: Doc;
 }
 function AllAnnotationsComponent({doc}: AllAnnotationsProps) {
-  return ce('details', {className: 'regular-sized limited-height'}, ce('summary', null, 'All dictionary annotations'),
-            ce('ol', null, ...doc.annotated.flatMap(v => v?.hits.map(o => ce('li', null, o.summary)) || [])))
+  return ce(
+      'details', {className: 'regular-sized limited-height'}, ce('summary', null, 'All dictionary annotations'),
+      ce('ol', null, ...doc.sha1s.flatMap(sha1 => doc.annotated[sha1]?.hits.map(o => ce('li', null, o.summary)) || [])))
 }
 
 //
@@ -434,14 +472,14 @@ interface SentenceProps {
   lineNumber: number;
 }
 const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}: SentenceProps) {
-  const raw = doc.raws[lineNumber];
-  const annotated = doc.annotated[lineNumber];
+  const raw = doc.raws[doc.sha1s[lineNumber]];
+  const annotated = doc.annotated[doc.sha1s[lineNumber]];
   if (!raw || !annotated) {
     return ce('p',
               null, //{onClick: () => setClickedHits(undefined)},
               doc.contents[lineNumber]);
   }
-  const {furigana, hits} = raw;
+  const {furigana} = raw;
 
   // a morpheme will be in a run or not. It might be in multiple runs. A run is at least one morpheme wide but can span
   // multiple whole morphemes. But here we don't need to worry about runs: just use start/endIdx.
@@ -475,8 +513,8 @@ const HitsComponent = observer(function HitsComponent({}: HitsProps) {
   if (!click) { return ce('div', null); }
 
   const {doc, lineNumber, morphemeNumber} = click;
-  const raw = doc.raws[lineNumber];
-  const annotations = doc.annotated[lineNumber];
+  const raw = doc.raws[doc.sha1s[lineNumber]];
+  const annotations = doc.annotated[doc.sha1s[lineNumber]];
   if (!raw || !annotations) { return ce('div', null); }
   const docUnique = doc.unique;
   const sha1 = doc.sha1s[lineNumber];
@@ -486,7 +524,8 @@ const HitsComponent = observer(function HitsComponent({}: HitsProps) {
   const wordIdToSentence: Map<string, {sentence: string, lino: number}[]> = new Map();
   {
     const wordIds: Set<string> = new Set(annotations?.hits?.map(o => o.wordId));
-    for (const [lino, a] of doc.annotated.entries()) {
+    for (const [lino, sha1] of doc.sha1s.entries()) {
+      const a = doc.annotated[sha1];
       if (a) {
         const sentence = doc.contents[lino];
         const hits = a.hits.filter(h => wordIds.has(h.wordId));
@@ -498,20 +537,22 @@ const HitsComponent = observer(function HitsComponent({}: HitsProps) {
   }
 
   function onClick(hit: ScoreHit, run: string|ContextCloze, startIdx: number, endIdx: number) {
-    const runStr = runToString(run);
-    const hitIdx =
-        doc.annotated[lineNumber]?.hits.findIndex(o => o.wordId === hit.wordId && runToString(o.run) === runStr) ?? -1;
-    // careful above, undefined means we didn't have `annotated[idx]` (stupid TypeScript pacification), -1 means we
-    if (hitIdx >= 0) {
-      const deleted = annotations?.hits.splice(hitIdx, 1);
-    } else {
-      const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
-      doc.annotated[lineNumber]?.hits.push(newAnnotatedHit);
-    }
-
-    // not sure whether the dereference inside the closure will trigger something, so store the observable out here
-    const memo = toJS(doc.annotated[lineNumber]);
-    db.upsert<AnnotatedAnalysis>(docLineAnnotatedToKey(docUnique, sha1), () => memo);
+    db.upsert<AnnotatedAnalysis>(docLineAnnotatedToKey(docUnique, sha1), annotated => {
+      const hits = annotated?.hits;
+      if (!annotated || !hits) {
+        // this SHOULD never happen so let's not deal with it
+        return false;
+      }
+      const runStr = runToString(run);
+      const hitIdx = hits.findIndex(o => o.wordId === hit.wordId && runToString(o.run) === runStr);
+      if (hitIdx >= 0) {
+        const deleted = hits.splice(hitIdx, 1);
+      } else {
+        const newAnnotatedHit: AnnotatedHit = {run, startIdx, endIdx, wordId: hit.wordId, summary: hit.summary};
+        hits.push(newAnnotatedHit);
+      }
+      return annotated as AnnotatedAnalysis;
+    });
   }
 
   const rawFurigana = raw.furigana[morphemeNumber];
@@ -561,8 +602,7 @@ const HitsComponent = observer(function HitsComponent({}: HitsProps) {
           v => ce('ol', null, ...v.results.map(result => {
             const highlit = wordIds.has(result.wordId + runToString(v.run));
             return ce('li', {className: highlit ? 'annotated-entry' : undefined}, ...highlight(v.run, result.summary),
-                      ce('button',
-                         {onClick: action('hit clicked', () => onClick(result, v.run, rawHits.startIdx, v.endIdx))},
+                      ce('button', {onClick: () => onClick(result, v.run, rawHits.startIdx, v.endIdx)},
                          highlit ? 'Entry highlighted! Remove?' : 'Create highlight?'));
           }))),
       // Need `key` to prevent https://reactjs.org/blog/2018/06/07/you-probably-dont-need-derived-state.html
@@ -578,8 +618,8 @@ function OverrideComponent({}: OverrideProps) {
   const click = clickStore.click;
   if (!click) { return ce(Fragment); }
   const {doc, lineNumber, morphemeNumber} = click;
-  const rawFurigana = doc.raws[lineNumber]?.furigana[morphemeNumber] || [];
-  const furigana = doc.annotated[lineNumber]?.furigana[morphemeNumber] || rawFurigana;
+  const rawFurigana = doc.raws[doc.sha1s[lineNumber]]?.furigana[morphemeNumber] || [];
+  const furigana = doc.annotated[doc.sha1s[lineNumber]]?.furigana[morphemeNumber] || rawFurigana;
   const rubys: Ruby[] = furigana.filter(s => typeof s !== 'string') as Ruby[];
   const baseText = furiganaToBase(furigana);
 
@@ -599,7 +639,7 @@ function OverrideComponent({}: OverrideProps) {
       ce('input', {type: 'checkbox', name: 'globalCheckbox', checked: global, onChange: () => setGlobal(!global)});
   const label = ce('label', {htmlFor: 'globalCheckbox'}, 'Global override?'); // Just `for` breaks clang-format :-/
   const submit = ce('button', {
-    onClick: action(() => {
+    onClick: () => {
       const override: Furigana[] = [];
       {
         let textsIdx = 0;
@@ -608,21 +648,17 @@ function OverrideComponent({}: OverrideProps) {
         }
       }
       if (global) {
-        // setDoc(doc => ({...doc, overrides: {...doc.overrides, [baseText]: override}}))
-        doc.overrides[baseText] = override;
         db.upsert<DbDoc>(docUniqueToKey(doc.unique), pdoc => {
           pdoc.overrides = {...pdoc.overrides, [baseText]: override};
           return pdoc as DbDoc;
         });
       } else {
-        const target = doc.annotated[lineNumber]?.furigana || [];
-        target[morphemeNumber] = override;
         db.upsert<AnnotatedAnalysis>(docLineAnnotatedToKey(doc.unique, doc.sha1s[lineNumber]), ann => {
           if (ann.furigana) { ann.furigana[morphemeNumber] = override; }
           return ann as AnnotatedAnalysis;
         });
       }
-    })
+    }
   },
                     'Submit override');
   const cancel = ce('button', {
@@ -646,15 +682,14 @@ function OverridesComponent({doc}: OverridesProps) {
   const keys = Object.keys(overrides);
   if (keys.length === 0) { return ce(Fragment); }
   return ce('div', null, ce('h3', null, 'Overrides'), ce('ol', null, ...keys.map(morpheme => {
-              const onClick = action(() => {
-                delete doc.overrides[morpheme];
+              const onClick = () => {
                 db.upsert<DbDoc>(docUniqueToKey(doc.unique), pdoc => {
                   const overrides = pdoc.overrides || {};
                   delete overrides[morpheme];
                   pdoc.overrides = overrides;
                   return pdoc as DbDoc;
                 })
-              });
+              };
               const fs = overrides[morpheme].map(
                   f => typeof f === 'string' ? f : ce('ruby', null, f.ruby, ce('rt', null, f.rt)));
               const deleter = ce('button', {onClick}, 'Delete');
@@ -667,14 +702,12 @@ function UndeleteComponent() {
   const [deleted, setDeleted] = useState([] as DbDoc[]);
   const refreshButton =
       ce('button', {onClick: () => deletedDocs().then(docs => setDeleted(docs))}, 'Refresh deleted docs');
-  const undelete = (doc: DbDoc) => db.upsert<DbDoc>(docUniqueToKey(doc.unique), () => doc)
-                                       .then(() => getDocs(doc.unique))
-                                       .then(docs => docsStore[doc.unique] = docs[doc.unique]);
+  const undelete = (doc: DbDoc) => db.upsert<DbDoc>(docUniqueToKey(doc.unique), () => doc);
   return ce(
       'div', null, ce('h2', null, 'Deleted'), refreshButton,
       ce('ol', null,
          ...deleted.map(doc => ce('li', null, `${doc.name} (${doc.unique}): ${doc.contents.join(' ').slice(0, 15)}…`,
-                                  ce('button', {onClick: action(() => undelete(doc))}, 'Undelete')))));
+                                  ce('button', {onClick: () => undelete(doc)}, 'Undelete')))));
 }
 
 //
