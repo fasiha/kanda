@@ -120,6 +120,23 @@ db.changes({since: 'now', live: true, include_docs: true})
           }
         }));
 
+(async function dbInit() {
+  const appName = `kanda-mobx`;
+  const server = `https://gotanda-1.glitch.me`;
+  var remotedb = new PouchDB(`${server}/db/${appName}`, {
+    fetch: (url, opts) => {
+      if (!opts) { opts = {}; }
+      opts.credentials = 'include';
+      return PouchDB.fetch(url, opts);
+    }
+  });
+  // One-time sync
+  await db.replicate.from(remotedb);
+
+  // Live-sync
+  db.sync(remotedb, {live: true, retry: true});
+})();
+
 function docUniqueToKey(unique: string) { return `doc-${unique}`; }
 function docLineRawToKey(docUnique: string, lineRaw: RawAnalysis|string) {
   return `docRaw-${docUnique}-${typeof lineRaw === 'string' ? lineRaw : lineRaw.sha1}`;
