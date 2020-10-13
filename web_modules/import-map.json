@@ -1,9 +1,10 @@
 {
   "imports": {
+    "mobx": "./mobx.js",
+    "mobx-react-lite": "./mobx-react-lite.js",
     "pouchdb-browser": "./pouchdb-browser.js",
     "pouchdb-upsert": "./pouchdb-upsert.js",
     "react": "./react.js",
-    "react-dom": "./react-dom.js",
-    "recoil": "./recoil.js"
+    "react-dom": "./react-dom.js"
   }
 }
