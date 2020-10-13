@@ -90,7 +90,7 @@ const db = new PouchDB('sidecar-docs');
 
 db.changes({since: 'now', live: true, include_docs: true})
     .on('change', action(async change => {
-          console.log({change});
+          // console.log({change});
           if (keyIsDocUnique(change.id)) {
             const dbdoc = change.doc as unknown as DbDoc;
             if (change.deleted) {
@@ -197,6 +197,7 @@ async function getDocs(singleDocUnique = ''): Promise<Docs> {
   for (const [idx, {doc}] of docsFound.rows.entries()) {
     if (doc) {
       // `doc` will contain lots of PouchDb keys so lets just rebuild our clean Doc
+      // Honestly though, we don't bother with cleaning out PouchDB keys in MobX anywhere else.
       const obj: Doc = {
         name: doc.name,
         unique: doc.unique,
@@ -261,12 +262,15 @@ interface ClickedMorpheme {
 }
 const clickStore = observable({click: undefined} as {click?: ClickedMorpheme});
 
-action(async function init() {
+(async function init() {
   const loaded = await getDocs();
-  for (const [k, v] of Object.entries(loaded)) {
-    docsStore[k] = v;
-    console.log('loading key: ', k);
-  }
+  action(() => {
+    for (const [k, v] of Object.entries(loaded)) {
+      docsStore[k] = observable(v, {raws: false});
+      // Above, use `raws:false` as override to omit `raws`, wihch never change, from being observed.
+      // This makes loading *much* faster.
+    }
+  })();
 })();
 
 /************
@@ -402,14 +406,16 @@ function AddDocComponent({old, done}: AddDocProps) {
           // two extra fields above: `furiganaBase` to search new strings for morphemes' bases; and `used` so we track
           // which hits are reused
           for (const remidx of indexRemoved) {
-            for (const [fidx, f] of (old.annotated[remidx]?.furigana || []).entries()) {
+            const sha1 = old.sha1s[remidx];
+            const a = old.annotated[sha1];
+            for (const [fidx, f] of (a ? a.furigana : []).entries()) {
               if (f) {
                 baseToFuri.set(furiganaToBase(f), f);
-                topToFuri.set(furiganaToTop(old.raws[remidx]?.furigana[fidx] || []), f);
+                topToFuri.set(furiganaToTop(old.raws[sha1]?.furigana[fidx] || []), f);
               }
             }
-            for (const h of (old.annotated[remidx]?.hits || [])) {
-              const furiganaBase = (old.raws[remidx]?.furigana.slice(h.startIdx, h.endIdx) || []).map(furiganaToBase);
+            for (const h of (a ? a.hits : [])) {
+              const furiganaBase = (old.raws[sha1]?.furigana.slice(h.startIdx, h.endIdx) || []).map(furiganaToBase);
               removedHits.push({...h, furiganaBase, used: false});
             }
           }
@@ -419,8 +425,8 @@ function AddDocComponent({old, done}: AddDocProps) {
             const newRaw = raws[sha1s[addidx]];
             if (newAnnotated && newRaw) {
               // reintroduce furigana if both base and top raws match
-              newAnnotated.furigana =
-                  newRaw.furigana.map(f => (baseToFuri.get(furiganaToBase(f)) && topToFuri.get(furiganaToTop(f))) || f);
+              newAnnotated.furigana = newRaw.furigana.map(
+                  f => (baseToFuri.get(furiganaToBase(f)) && topToFuri.get(furiganaToTop(f))) || undefined);
 
               // reintroduce hits if run present
               const newHaystack = newRaw.furigana.map(furiganaToBase);
@@ -731,7 +737,6 @@ function UndeleteComponent() {
 function ExportComponent() {
   return ce('button', {
     onClick: async () => {
-      await db.compact();
       const all = await getDocs();
       const file = new Blob([JSON.stringify(all)], {type: 'application/json'});
       const element = document.createElement("a");
