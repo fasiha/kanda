@@ -121,7 +121,7 @@ db.changes({since: 'now', live: true, include_docs: true})
         }));
 
 (async function dbInit() {
-  const appName = `kanda-mobx`;
+  const appName = `kanda-mobx2`;
   const server = `https://gotanda-1.glitch.me`;
   var remotedb = new PouchDB(`${server}/db/${appName}`, {
     fetch: (url, opts) => {
