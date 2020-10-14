@@ -483,11 +483,11 @@ function AddDocComponent({old, done}: AddDocProps) {
 interface AllAnnotationsProps {
   doc: Doc;
 }
-function AllAnnotationsComponent({doc}: AllAnnotationsProps) {
+const AllAnnotationsComponent = observer(function AllAnnotationsComponent({doc}: AllAnnotationsProps) {
   return ce(
       'details', {className: 'regular-sized limited-height'}, ce('summary', null, 'All dictionary annotations'),
       ce('ol', null, ...doc.sha1s.flatMap(sha1 => doc.annotated[sha1]?.hits.map(o => ce('li', null, o.summary)) || [])))
-}
+});
 
 //
 interface SentenceProps {
@@ -629,9 +629,9 @@ const HitsComponent = observer(function HitsComponent({}: HitsProps) {
                          highlit ? 'Entry highlighted! Remove?' : 'Create highlight?'));
           }))),
       // Need `key` to prevent https://reactjs.org/blog/2018/06/07/you-probably-dont-need-derived-state.html
-      ce(OverrideComponent, {key: `${doc.unique}${lineNumber}${morphemeNumber}`}),
       kanjiComponent,
       usagesComponent,
+      ce(OverrideComponent, {key: `${doc.unique}${lineNumber}${morphemeNumber}`}),
   );
 });
 
