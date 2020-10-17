@@ -1,11 +1,4 @@
-.container {
-  display:grid;
-  grid-template-columns: 1fr 1fr;
-}
-
-.left-containee {
-  height: 100vh;
-  overflow-y: scroll;
+.main {
   font-size: xx-large; /* xxx-large is unsupported in Safari as of Aug 2020 */
 }
 
@@ -13,9 +6,14 @@
   font-size: medium;
 }
 
-.right-containee {
-  height: 100vh;
+.not-main {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  max-height: 50vh;
   overflow-y: scroll;
+  width: 100%;
+  background-color: #1E095D;
   color: #A98CFD;
 }
 

@@ -281,20 +281,20 @@ import {createElement as ce, Fragment, Suspense, useState} from 'react';
 
 interface DocsProps {}
 export const DocsComponent = observer(function DocsComponent({}: DocsProps) {
-  const left = ce(
-      'div',
-      {id: 'all-docs', className: 'left-containee'},
-      ...Object.values(docsStore).map(doc => ce(DocComponent, {doc})),
-      ce(AddDocComponent),
-      ce(UndeleteComponent),
-      ce(ExportComponent),
-  );
-  const right = ce(
-      'div',
-      {className: 'right-containee'},
-      ce(Suspense, {fallback: ce('p', null, 'Loading…')}, ce(HitsComponent)),
-  );
-  return ce('div', {className: 'container'}, left, right);
+  return ce('div', {},
+            ce(
+                'div',
+                {id: 'all-docs', className: 'main'},
+                ...Object.values(docsStore).map(doc => ce(DocComponent, {doc})),
+                ce(AddDocComponent),
+                ce(UndeleteComponent),
+                ce(ExportComponent),
+                ),
+            ce(
+                'div',
+                {className: 'not-main'},
+                ce(Suspense, {fallback: ce('p', null, 'Loading…')}, ce(HitsComponent)),
+                ));
 });
 
 //
@@ -621,6 +621,7 @@ const HitsComponent = observer(function HitsComponent({}: HitsProps) {
   return ce(
       'div',
       null,
+      ce('button', {onClick: action(() => clickStore.click = undefined)}, 'close'),
       ...rawHits.results.map(
           v => ce('ol', null, ...v.results.map(result => {
             const highlit = wordIds.has(result.wordId + runToString(v.run));
