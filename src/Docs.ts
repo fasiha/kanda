@@ -98,10 +98,12 @@ db.changes({since: 'now', live: true, include_docs: true})
               if (hit) { delete docsStore[hit.unique]; }
             } else {
               const target: Doc|undefined = docsStore[dbdoc.unique];
-              if (target) {
+              if (target && dbdoc.sha1s.every(sha1=>sha1 in target.raws)) {
+                // we didn't add any new lines (if we did, target.raws might be missing sha1s)
                 target.sha1s = dbdoc.sha1s;
                 target.contents = dbdoc.contents;
                 target.overrides = dbdoc.overrides;
+                target.name = dbdoc.name;
               } else {
                 docsStore[dbdoc.unique] = (await getDocs(dbdoc.unique))[dbdoc.unique];
               }
