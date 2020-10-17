@@ -98,7 +98,7 @@ db.changes({since: 'now', live: true, include_docs: true})
               if (hit) { delete docsStore[hit.unique]; }
             } else {
               const target: Doc|undefined = docsStore[dbdoc.unique];
-              if (target && dbdoc.sha1s.every(sha1=>sha1 in target.raws)) {
+              if (target && dbdoc.sha1s.every(sha1 => sha1 in target.raws)) {
                 // we didn't add any new lines (if we did, target.raws might be missing sha1s)
                 target.sha1s = dbdoc.sha1s;
                 target.contents = dbdoc.contents;
@@ -287,6 +287,9 @@ export const DocsComponent = observer(function DocsComponent({}: DocsProps) {
             ce(
                 'div',
                 {id: 'all-docs', className: 'main'},
+                ce('ul', {},
+                   ...Object.values(docsStore).map(
+                       doc => ce('li', null, ce('a', {href: '#' + doc.unique}, doc.name || doc.unique)))),
                 ...Object.values(docsStore).map(doc => ce(DocComponent, {doc})),
                 ce(AddDocComponent),
                 ce(UndeleteComponent),
@@ -318,7 +321,7 @@ const DocComponent = observer(function DocComponent({doc}: DocProps) {
   return ce(
       'div',
       {className: 'doc'},
-      ce('h2', null, doc.name || doc.unique, deleteButton, editButton),
+      ce('h2', {id: doc.unique}, doc.name || doc.unique, deleteButton, editButton),
       editOrRender,
       ce(OverridesComponent, {doc}),
       ce(AllAnnotationsComponent, {doc}),
