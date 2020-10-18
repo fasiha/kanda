@@ -125,6 +125,13 @@ db.changes({since: 'now', live: true, include_docs: true})
 (async function dbInit() {
   const appName = `kanda-mobx2`;
   const server = `https://gotanda-1.glitch.me`;
+
+  (action(async () => {
+    const res = await fetch(`${server}/loginstatus`, {credentials: 'include'});
+    gotandaStore.loggedIn = res.ok;
+    gotandaStore.serverMessage = await res.text();
+  }))();
+
   var remotedb = new PouchDB(`${server}/db/${appName}`, {
     fetch: (url, opts) => {
       if (!opts) { opts = {}; }
@@ -256,6 +263,8 @@ MobX
 ************/
 import {observable, action} from "mobx";
 const docsStore = observable({} as Docs);
+const gotandaStore =
+    observable({loggedIn: undefined as boolean | undefined, serverMessage: undefined as string | undefined, debug: ''});
 
 interface ClickedMorpheme {
   doc: Doc;
@@ -283,7 +292,7 @@ import {createElement as ce, Fragment, Suspense, useState} from 'react';
 
 interface DocsProps {}
 export const DocsComponent = observer(function DocsComponent({}: DocsProps) {
-  return ce('div', {},
+  return ce('div', {}, ce(LoginComponent),
             ce(
                 'div',
                 {id: 'all-docs', className: 'main'},
@@ -300,6 +309,16 @@ export const DocsComponent = observer(function DocsComponent({}: DocsProps) {
                 {className: 'not-main'},
                 ce(Suspense, {fallback: ce('p', null, 'Loading…')}, ce(HitsComponent)),
                 ));
+});
+
+//
+interface LoginProps {}
+const LoginComponent = observer(function LoginComponent({}: LoginProps) {
+  const gotanda = gotandaStore;
+  return ce('div', {className: 'login-header'},
+            typeof gotanda.loggedIn === 'boolean'
+                ? gotanda.loggedIn ? 'Logged in!' : ce('a', {href: 'https://gotanda-1.glitch.me/'}, 'Log in to Gotanda')
+                : '(waiting)')
 });
 
 //
