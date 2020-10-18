@@ -1,4 +1,10 @@
-const code=`.main {
+const code=`.login-header {
+  width: 100%;
+  background-color: #1E095D;
+  color: white;
+}
+
+.main {
   font-size: xx-large; /* xxx-large is unsupported in Safari as of Aug 2020 */
 }
 
