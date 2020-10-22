@@ -126,11 +126,14 @@ db.changes({since: 'now', live: true, include_docs: true})
   const appName = `kanda-mobx2`;
   const server = `https://gotanda-1.glitch.me`;
 
-  (action(async () => {
+  {
     const res = await fetch(`${server}/loginstatus`, {credentials: 'include'});
-    gotandaStore.loggedIn = res.ok;
-    gotandaStore.serverMessage = await res.text();
-  }))();
+    let text = res.ok ? await res.text() : undefined;
+    runInAction(() => {
+      gotandaStore.loggedIn = res.ok;
+      if (text) { gotandaStore.serverMessage = text; }
+    })
+  }
 
   var remotedb = new PouchDB(`${server}/db/${appName}`, {
     fetch: (url, opts) => {
@@ -261,7 +264,7 @@ async function deletedDocs() {
 /************
 MobX
 ************/
-import {observable, action} from "mobx";
+import {observable, action, runInAction} from "mobx";
 const docsStore = observable({} as Docs);
 const gotandaStore =
     observable({loggedIn: undefined as boolean | undefined, serverMessage: undefined as string | undefined, debug: ''});
