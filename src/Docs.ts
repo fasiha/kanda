@@ -930,8 +930,9 @@ function UndeleteComponent() {
 function ExportComponent() {
   return ce('button', {
     onClick: async () => {
-      const all = await getDocs();
-      const file = new Blob([JSON.stringify(all)], {type: 'application/json'});
+      const docs = await getDocs();
+      const memories = await getMemories(memdb);
+      const file = new Blob([JSON.stringify({docs, memories})], {type: 'application/json'});
       const element = document.createElement("a");
       element.href = URL.createObjectURL(file);
       element.download = `kanda-${(new Date()).toISOString().replace(/:/g, '.')}.json`;
