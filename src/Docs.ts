@@ -80,6 +80,23 @@ type SearchMapped<T> = {
   children: SearchMapped<T>[],
 };
 
+import ebisu from 'ebisu-js';
+interface EbisuModel {
+  memory: [number, number, number];
+  epoch: number;
+}
+enum JmdictQuiztype {
+  kana2meaning = 'kana2meaning',
+  kanji2kana = 'kanji2kana',
+  any2kanji = 'any2kanji',
+}
+interface JmdictMemory {
+  memoryType: 'jmdictWordId';
+  wordId: string;
+  summary: string;
+  ebisus: Partial<Record<keyof typeof JmdictQuiztype, EbisuModel>>;
+}
+
 /************
 Pouchdb: what lives in the database
 ************/
@@ -87,16 +104,33 @@ import PouchDB from 'pouchdb-browser';
 import PouchUpsert from 'pouchdb-upsert';
 PouchDB.plugin(PouchUpsert);
 const db = new PouchDB('sidecar-docs');
+const memdb = new PouchDB('sidecar-memories');
+
+memdb.changes({since: 'now', live: true, include_docs: true})
+    .on(
+        'change',
+        action(change => {
+          if (keyIsMemory(change.id)) {
+            if (change.deleted) {
+              // unhandled, not really required since we can delete ebisu for all quiz types for this
+              // wordId without ever deleting the wordId memory itself
+            } else {
+              const mem = change.doc as unknown as JmdictMemory;
+              wordIdsStore.set(mem.wordId, Object.keys(mem.ebisus) as JmdictQuiztype[]);
+            }
+          }
+        }),
+    );
 
 db.changes({since: 'now', live: true, include_docs: true})
     .on('change', action(async change => {
           // console.log({change});
           if (keyIsDocUnique(change.id)) {
-            const dbdoc = change.doc as unknown as DbDoc;
             if (change.deleted) {
               const hit = Object.values(docsStore).find(doc => docUniqueToKey(doc.unique) === change.id);
               if (hit) { delete docsStore[hit.unique]; }
             } else {
+              const dbdoc = change.doc as unknown as DbDoc;
               const target: Doc|undefined = docsStore[dbdoc.unique];
               if (target && dbdoc.sha1s.every(sha1 => sha1 in target.raws)) {
                 // we didn't add any new lines (if we did, target.raws might be missing sha1s)
@@ -147,7 +181,7 @@ db.changes({since: 'now', live: true, include_docs: true})
 
   // Live-sync
   db.sync(remotedb, {live: true, retry: true});
-})();
+}); // DISABLED
 
 function docUniqueToKey(unique: string) { return `doc-${unique}`; }
 function docLineRawToKey(docUnique: string, lineRaw: RawAnalysis|string) {
@@ -156,10 +190,14 @@ function docLineRawToKey(docUnique: string, lineRaw: RawAnalysis|string) {
 function docLineAnnotatedToKey(docUnique: string, lineAnnotated: AnnotatedAnalysis|string) {
   return `docAnnotated-${docUnique}-${typeof lineAnnotated === 'string' ? lineAnnotated : lineAnnotated.sha1}`;
 }
+function memoryToKey(memory: JmdictMemory|string) {
+  return 'memory-' + (typeof memory === 'string' ? memory : memory.wordId); // need memory.type? Jmdict, Grammar, etc.?
+}
 
 function keyIsDocUnique(key: string) { return key.startsWith('doc-'); }
 function keyIsDocLineRaw(key: string) { return key.startsWith('docRaw-'); }
 function keyIsDocLineAnnotated(key: string) { return key.startsWith('docAnnotated-'); }
+function keyIsMemory(key: string) { return key.startsWith('memory-'); }
 
 interface DbDoc {
   name: Doc['name'];
@@ -225,6 +263,42 @@ async function getDocs(singleDocUnique = ''): Promise<Docs> {
   return ret
 }
 
+async function getMemories(db: PouchDB.Database<{}>): Promise<JmdictMemory[]> {
+  const startkey = memoryToKey('');
+  const found = await db.allDocs<JmdictMemory>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
+  const ret: JmdictMemory[] = [];
+  for (const row of found.rows) {
+    const doc = row.doc;
+    if (doc) { ret.push(doc); }
+  }
+  return ret;
+}
+
+async function getWeakestMemory(db: PouchDB.Database<{}>,
+                                date = Date.now()): Promise<{memory: JmdictMemory | undefined, total: number}> {
+  const startkey = memoryToKey('');
+  const found = await db.allDocs<JmdictMemory>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
+
+  const HOURS_PER_MS = 1 / 3600e3;
+
+  let total = 0;
+
+  const minRecall = Infinity;
+  let weakest: JmdictMemory|undefined = undefined; // this should have just one key in `ebisus`
+  for (const row of found.rows) {
+    const doc = row.doc;
+    if (doc) {
+      ++total;
+      for (const [sub, model] of Object.entries(doc.ebisus)) {
+        if (!model) { continue; } // PURELY TYPESCRIPT PACIFICATION >.< that I need Partial for doc.ebisus
+        const recall = ebisu.predictRecall(model.memory, (date - model.epoch) * HOURS_PER_MS);
+        if (recall < minRecall) { weakest = {...doc, ebisus: {[sub as JmdictQuiztype]: model}}; }
+      }
+    }
+  }
+  return {memory: weakest, total};
+}
+
 async function deleteDoc(unique: string) { return db.upsert(docUniqueToKey(unique), () => ({_deleted: true})); }
 
 async function deletedDocIds(): Promise<string[]> {
@@ -266,6 +340,11 @@ MobX
 ************/
 import {observable, action, runInAction} from "mobx";
 const docsStore = observable({} as Docs);
+type EbisuStore = {
+  payload?: {memory?: JmdictMemory, history: any[]}
+};
+const ebisuStore = observable({state: 'left'} as EbisuStore);
+const wordIdsStore = observable.map(new Map() as Map<string, JmdictQuiztype[]>); // wordId -> types
 const gotandaStore =
     observable({loggedIn: undefined as boolean | undefined, serverMessage: undefined as string | undefined, debug: ''});
 
@@ -277,9 +356,11 @@ interface ClickedMorpheme {
 const clickStore = observable({click: undefined} as {click?: ClickedMorpheme});
 
 (async function init() {
-  const loaded = await getDocs();
+  const [docs, memories] = await Promise.all([getDocs(), getMemories(memdb)]);
   action(() => {
-    for (const [k, v] of Object.entries(loaded)) {
+    wordIdsStore.replace(memories.map(m => [m.wordId, Object.keys(m.ebisus)]));
+
+    for (const [k, v] of Object.entries(docs)) {
       docsStore[k] = observable(v, {raws: false});
       // Above, use `raws:false` as override to omit `raws`, wihch never change, from being observed.
       // This makes loading *much* faster.
@@ -295,7 +376,7 @@ import {createElement as ce, Fragment, Suspense, useState} from 'react';
 
 interface DocsProps {}
 export const DocsComponent = observer(function DocsComponent({}: DocsProps) {
-  return ce('div', {}, ce(LoginComponent),
+  return ce('div', {}, ce(LoginComponent), ce(QuizComponent),
             ce(
                 'div',
                 {id: 'all-docs', className: 'main'},
@@ -322,6 +403,27 @@ const LoginComponent = observer(function LoginComponent({}: LoginProps) {
             typeof gotanda.loggedIn === 'boolean'
                 ? gotanda.loggedIn ? 'Logged in!' : ce('a', {href: 'https://gotanda-1.glitch.me/'}, 'Log in to Gotanda')
                 : '(waiting)')
+});
+
+//
+const QuizComponent = observer(function QuizComponent() {
+  if (!ebisuStore.payload) {
+    const button = ce('button', {
+      onClick: async () => {
+        const now = Date.now();
+        const best = await getWeakestMemory(memdb, now);
+        runInAction(() => { ebisuStore.payload = observable({memory: best.memory, history: []}); })
+      }
+    },
+                      'Get quiz');
+    return button;
+  }
+  const memory = ebisuStore.payload.memory;
+  if (memory) {
+    // memory found!
+    return ce('div', null, 'I will quiz you!' + JSON.stringify(memory));
+  }
+  return ce('div', null, 'Nothing to quiz!');
 });
 
 //
@@ -652,9 +754,41 @@ const HitsComponent = observer(function HitsComponent({}: HitsProps) {
       ...rawHits.results.map(
           v => ce('ol', null, ...v.results.map(result => {
             const highlit = wordIds.has(result.wordId + runToString(v.run));
+            const types = wordIdsStore.get(result.wordId) || [];
+            const learnButtons =
+                (highlit)
+                    ? [ce('button', {
+                        onClick: () => {
+                          memdb.upsert<JmdictMemory>(memoryToKey(result.wordId), m => {
+                            console.log('UPSERTING!', m)
+                            if (!m.wordId) {
+                              // brand new wordId
+                              return {
+                                wordId: result.wordId,
+                                memoryType: 'jmdictWordId',
+                                summary: result.summary,
+                                ebisus: {[JmdictQuiztype.kana2meaning]: defaultEbisuModel()}
+                              };
+                            }
+                            // we have had *some* kind of memory for wordId. It might be empty!, i.e., no JmdictQuiztype
+                            // with ebisu models
+                            const ebisus = m.ebisus || {};
+                            if (ebisus.kana2meaning) {
+                              delete ebisus.kana2meaning;
+                            } else {
+                              ebisus.kana2meaning = defaultEbisuModel();
+                            }
+                            m.ebisus = ebisus;
+                            return m as JmdictMemory;
+                          })
+                        }
+                      },
+                          (types.includes(JmdictQuiztype.kana2meaning) ? 'Unlearn kana?' : 'Mark kana as learned!'))]
+                    : [];
             return ce('li', {className: highlit ? 'annotated-entry' : undefined}, ...highlight(v.run, result.summary),
                       ce('button', {onClick: () => onClick(result, v.run, rawHits.startIdx, v.endIdx)},
-                         highlit ? 'Entry highlighted! Remove?' : 'Create highlight?'));
+                         highlit ? 'Entry highlighted! Remove?' : 'Create highlight?'),
+                      ...learnButtons);
           }))),
       // Need `key` to prevent https://reactjs.org/blog/2018/06/07/you-probably-dont-need-derived-state.html
       kanjiComponent,
@@ -868,3 +1002,5 @@ function generateContextClozed(left: string, cloze: string, right: string): Cont
 
 function simplifyCloze(c: ContextCloze): ContextCloze|string { return (!c.right && !c.left) ? c.cloze : c; }
 function runToBase(run: string|ContextCloze) { return typeof run === 'string' ? run : run.cloze; }
+
+function defaultEbisuModel(d = Date.now()): EbisuModel { return {epoch: d, memory: ebisu.defaultModel(1.0, 2.5)}; }
