@@ -1,5 +1,6 @@
 {
   "imports": {
+    "ebisu-js": "./ebisu-js.js",
     "mobx": "./mobx.js",
     "mobx-react-lite": "./mobx-react-lite.js",
     "pouchdb-browser": "./pouchdb-browser.js",

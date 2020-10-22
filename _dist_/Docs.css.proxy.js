@@ -4,6 +4,14 @@ const code=`.login-header {
   color: white;
 }
 
+.hidden-till-highlight{
+  background-color: black;
+  color: black;
+}
+.hidden-till-highlight::selection {
+  background-color: black;
+  color: #5218FA;
+}
 .main {
   font-size: xx-large; /* xxx-large is unsupported in Safari as of Aug 2020 */
 }
