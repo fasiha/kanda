@@ -106,6 +106,8 @@ PouchDB.plugin(PouchUpsert);
 const db = new PouchDB('sidecar-docs');
 const memdb = new PouchDB('sidecar-memories');
 
+// memdb stores memories. We store these separate from the document because flashcards are orthogonal to intensive
+// reading
 memdb.changes({since: 'now', live: true, include_docs: true})
     .on(
         'change',
@@ -122,9 +124,9 @@ memdb.changes({since: 'now', live: true, include_docs: true})
         }),
     );
 
+// db stores the documents and reading and dictionary annotations, etc.
 db.changes({since: 'now', live: true, include_docs: true})
     .on('change', action(async change => {
-          // console.log({change});
           if (keyIsDocUnique(change.id)) {
             if (change.deleted) {
               const hit = Object.values(docsStore).find(doc => docUniqueToKey(doc.unique) === change.id);
@@ -157,7 +159,6 @@ db.changes({since: 'now', live: true, include_docs: true})
         }));
 
 (async function dbInit() {
-  const appName = `kanda-mobx2`;
   const server = `https://gotanda-1.glitch.me`;
 
   {
@@ -169,19 +170,21 @@ db.changes({since: 'now', live: true, include_docs: true})
     })
   }
 
-  var remotedb = new PouchDB(`${server}/db/${appName}`, {
-    fetch: (url, opts) => {
-      if (!opts) { opts = {}; }
-      opts.credentials = 'include';
-      return PouchDB.fetch(url, opts);
-    }
-  });
-  // One-time sync
-  await db.replicate.from(remotedb);
+  for (const [subdb, appName] of [[db, `kanda-mobx2`], [memdb, 'kanda-memories']] as const) {
+    var remotedb = new PouchDB(`${server}/db/${appName}`, {
+      fetch: (url, opts) => {
+        if (!opts) { opts = {}; }
+        opts.credentials = 'include';
+        return PouchDB.fetch(url, opts);
+      }
+    });
+    // One-time sync
+    await subdb.replicate.from(remotedb);
 
-  // Live-sync
-  db.sync(remotedb, {live: true, retry: true});
-}); // DISABLED
+    // Live-sync
+    subdb.sync(remotedb, {live: true, retry: true});
+  }
+})();
 
 function docUniqueToKey(unique: string) { return `doc-${unique}`; }
 function docLineRawToKey(docUnique: string, lineRaw: RawAnalysis|string) {
@@ -279,11 +282,9 @@ async function getWeakestMemory(db: PouchDB.Database<{}>,
   const startkey = memoryToKey('');
   const found = await db.allDocs<JmdictMemory>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
 
-  const HOURS_PER_MS = 1 / 3600e3;
-
   let total = 0;
 
-  const minRecall = Infinity;
+  let minRecall = Infinity;
   let weakest: JmdictMemory|undefined = undefined; // this should have just one key in `ebisus`
   for (const row of found.rows) {
     const doc = row.doc;
@@ -292,7 +293,10 @@ async function getWeakestMemory(db: PouchDB.Database<{}>,
       for (const [sub, model] of Object.entries(doc.ebisus)) {
         if (!model) { continue; } // PURELY TYPESCRIPT PACIFICATION >.< that I need Partial for doc.ebisus
         const recall = ebisu.predictRecall(model.memory, (date - model.epoch) * HOURS_PER_MS);
-        if (recall < minRecall) { weakest = {...doc, ebisus: {[sub as JmdictQuiztype]: model}}; }
+        if (recall < minRecall) {
+          weakest = {...doc, ebisus: {[sub as JmdictQuiztype]: model}};
+          minRecall = recall;
+        }
       }
     }
   }
@@ -412,16 +416,44 @@ const QuizComponent = observer(function QuizComponent() {
       onClick: async () => {
         const now = Date.now();
         const best = await getWeakestMemory(memdb, now);
-        runInAction(() => { ebisuStore.payload = observable({memory: best.memory, history: []}); })
+        runInAction(() => { ebisuStore.payload = ({memory: best.memory, history: []}); })
       }
     },
                       'Get quiz');
     return button;
   }
   const memory = ebisuStore.payload.memory;
-  if (memory) {
+  if (memory && memory.ebisus.kana2meaning) {
+
     // memory found!
-    return ce('div', null, 'I will quiz you!' + JSON.stringify(memory));
+    const [left, right] = memory.summary.split('|');
+    const onClick = (success: boolean) => {
+      memdb.upsert<JmdictMemory>(
+          memoryToKey(memory.wordId), action(m => {
+            if (!m) { return false; }
+            const ebisus = m.ebisus;
+            if (!ebisus) { return false; }
+            const kana2meaning = ebisus.kana2meaning;
+            if (!kana2meaning) { return false; } // ALL TYPESCRIPT PACIFICATION
+            const now = Date.now();
+            ebisus.kana2meaning = {
+              epoch: now,
+              memory: ebisu.updateRecall(kana2meaning.memory, +success, 1, (now - kana2meaning.epoch) * HOURS_PER_MS)
+            };
+
+            // when we have other quiz types (e.g., kanji), update those passively. Similarly once we have Jmdict
+            // dependencies.
+
+            // clear the MobX store that renders this quiz box (this diff function is an `action`)
+            ebisuStore.payload = undefined;
+
+            return m as JmdictMemory;
+          }));
+    };
+    return ce('div', null, `Do you know what this means: ${left}`, ce('button', {onClick: () => onClick(true)}, 'Yes!'),
+              ce('button', {onClick: () => onClick(false)}, 'No…'),
+              ce('button', {onClick: action(() => ebisuStore.payload = undefined)}, 'Cancel'),
+              ce('details', null, ce('span', {className: 'hidden-till-highlight'}, right)));
   }
   return ce('div', null, 'Nothing to quiz!');
 });
@@ -760,7 +792,6 @@ const HitsComponent = observer(function HitsComponent({}: HitsProps) {
                     ? [ce('button', {
                         onClick: () => {
                           memdb.upsert<JmdictMemory>(memoryToKey(result.wordId), m => {
-                            console.log('UPSERTING!', m)
                             if (!m.wordId) {
                               // brand new wordId
                               return {
@@ -1004,3 +1035,4 @@ function simplifyCloze(c: ContextCloze): ContextCloze|string { return (!c.right 
 function runToBase(run: string|ContextCloze) { return typeof run === 'string' ? run : run.cloze; }
 
 function defaultEbisuModel(d = Date.now()): EbisuModel { return {epoch: d, memory: ebisu.defaultModel(1.0, 2.5)}; }
+const HOURS_PER_MS = 1 / 3600e3;
