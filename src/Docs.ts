@@ -106,6 +106,8 @@ PouchDB.plugin(PouchUpsert);
 const db = new PouchDB('sidecar-docs');
 const memdb = new PouchDB('sidecar-memories');
 
+const GOTANDA_SERVER = `https://gotanda-1.glitch.me`;
+
 // memdb stores memories. We store these separate from the document because flashcards are orthogonal to intensive
 // reading
 memdb.changes({since: 'now', live: true, include_docs: true})
@@ -159,10 +161,8 @@ db.changes({since: 'now', live: true, include_docs: true})
         }));
 
 (async function dbInit() {
-  const server = `https://gotanda-1.glitch.me`;
-
   {
-    const res = await fetch(`${server}/loginstatus`, {credentials: 'include'});
+    const res = await fetch(`${GOTANDA_SERVER}/loginstatus`, {credentials: 'include'});
     let text = res.ok ? await res.text() : undefined;
     runInAction(() => {
       gotandaStore.loggedIn = res.ok;
@@ -170,8 +170,9 @@ db.changes({since: 'now', live: true, include_docs: true})
     })
   }
 
-  for (const [subdb, appName] of [[db, `kanda-mobx2`], [memdb, 'kanda-memories']] as const) {
-    var remotedb = new PouchDB(`${server}/db/${appName}`, {
+  const KANDA_APP_NAME = 'kanda-mobx2';
+  for (const [subdb, appName] of [[db, KANDA_APP_NAME], [memdb, 'kanda-memories']] as const) {
+    const remotedb = new PouchDB(`${GOTANDA_SERVER}/db/${appName}`, {
       fetch: (url, opts) => {
         if (!opts) { opts = {}; }
         opts.credentials = 'include';
@@ -183,6 +184,28 @@ db.changes({since: 'now', live: true, include_docs: true})
 
     // Live-sync
     subdb.sync(remotedb, {live: true, retry: true});
+  }
+
+  {
+    type Links = {
+      onlookers: {onlooker: string, app: string}[],
+      creators: {creator: string, app: string}[],
+    }
+
+    const res = await fetch(`${GOTANDA_SERVER}/me/onlookers`, {credentials: 'include'});
+    if (res.ok) {
+      const data: Links = await res.json();
+      for (const link of data.creators.filter(o => o.app === KANDA_APP_NAME)) {
+        const remotedb = new PouchDB(`${GOTANDA_SERVER}/creator/${link.creator}/app/${link.app}`, {
+          fetch: (url, opts) => {
+            if (!opts) { opts = {}; }
+            opts.credentials = 'include';
+            return PouchDB.fetch(url, opts);
+          }
+        });
+        await db.replicate.from(remotedb, {live: true, retry: true});
+      }
+    }
   }
 })();
 
@@ -405,7 +428,7 @@ const LoginComponent = observer(function LoginComponent({}: LoginProps) {
   const gotanda = gotandaStore;
   return ce('div', {className: 'login-header'},
             typeof gotanda.loggedIn === 'boolean'
-                ? gotanda.loggedIn ? 'Logged in!' : ce('a', {href: 'https://gotanda-1.glitch.me/'}, 'Log in to Gotanda')
+                ? gotanda.loggedIn ? 'Logged in!' : ce('a', {href: GOTANDA_SERVER}, 'Log in to Gotanda')
                 : '(waiting)')
 });
 
