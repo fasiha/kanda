@@ -203,7 +203,10 @@ db.changes({since: 'now', live: true, include_docs: true})
             return PouchDB.fetch(url, opts);
           }
         });
-        await db.replicate.from(remotedb, {live: true, retry: true});
+        // One-time sync
+        await db.replicate.from(remotedb);
+        // Live-sync
+        db.replicate.from(remotedb, {live: true, retry: true});
       }
     }
   }
