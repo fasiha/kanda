@@ -143,7 +143,8 @@ db.changes({since: 'now', live: true, include_docs: true})
                 target.overrides = dbdoc.overrides;
                 target.name = dbdoc.name;
               } else {
-                docsStore[dbdoc.unique] = (await getDocs(dbdoc.unique))[dbdoc.unique];
+                const res = (await getDocs(dbdoc.unique))[dbdoc.unique];
+                runInAction(() => docsStore[dbdoc.unique] = res);
               }
             }
           } else if (keyIsDocLineRaw(change.id)) {
