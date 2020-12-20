@@ -591,7 +591,7 @@ function AddDocComponent({old, done}: AddDocProps) {
             for (const [fidx, f] of (a ? a.furigana : []).entries()) {
               if (f) {
                 baseToFuri.set(furiganaToBase(f), f);
-                topToFuri.set(furiganaToTop(raw?.furigana[fidx] || []), f);
+                topToFuri.set(furiganaToTop(raw?.furigana[fidx] || ['<none>']), f);
               }
             }
             for (const h of (a ? a.hits : [])) {
