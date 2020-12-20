@@ -27,7 +27,7 @@ interface AnnotatedAnalysis {
   sha1: string;
   text: string;
   furigana: (Furigana[]|undefined)[]; // overrides for each morpheme
-  hits: AnnotatedHit[];   // hits can span morphemes, so no constraints on this length
+  hits: AnnotatedHit[];               // hits can span morphemes, so no constraints on this length
 }
 interface RawAnalysis {
   sha1: string;
@@ -525,13 +525,8 @@ function AddDocComponent({old, done}: AddDocProps) {
       // Don't resubmit old sentences to server
       const oldLinesToLino = new Map(old ? old.contents.map((line, i) => [line, i]) : []);
       const linesAdded = old ? newContents.filter(line => !oldLinesToLino.has(line)) : newContents;
-      const res = await fetch(NLP_SERVER, {
-        body: JSON.stringify({sentences: linesAdded}),
-        headers: {'Content-Type': 'application/json'},
-        method: 'POST',
-      });
-      if (res.ok) {
-        const resData: v1ResSentence[] = await res.json();
+      const resData = await nlpServer(linesAdded);
+      if (resData) {
         const raws: Record<string, undefined|RawAnalysis> = {};
         const annotated: Doc['annotated'] = {};
         const sha1s: string[] = [];                             // should be same length as newContents
@@ -683,7 +678,7 @@ const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}:
               null, //{onClick: () => setClickedHits(undefined)},
               doc.contents[lineNumber]);
   }
-  const {furigana} = annotated;
+  const {furigana, text} = annotated;
 
   // a morpheme will be in a run or not. It might be in multiple runs. A run is at least one morpheme wide but can span
   // multiple whole morphemes. But here we don't need to worry about runs: just use start/endIdx.
@@ -695,23 +690,31 @@ const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}:
   }
   const c =
       idxsAnnotated.size > 0 ? ((i: number) => idxsAnnotated.has(i) ? 'annotated-text' : undefined) : () => undefined;
-  return ce(
-      'p', {id: `${doc.unique}-${lineNumber}`},
-      ...furigana
-          .map(morpheme => morpheme ? doc.overrides[furiganaToBase(morpheme)] || morpheme : ['missing'])
-          .flatMap((v, i) => v.map(o => {
-            const onClick = async () => {
-              const click: ClickedMorpheme = {
-                doc,
-                lineNumber,
-                morphemeNumber: i,
-                raw: await db.get<RawAnalysis|undefined>(docLineRawToKey(doc.unique, doc.sha1s[lineNumber]))
-              };
-              runInAction(() => clickStore.click = click)
-            };
-            if (typeof o === 'string') { return ce('span', {className: c(i), onClick}, o); }
-            return ce('ruby', {className: c(i), onClick}, o.ruby, ce('rt', null, o.rt))
-          })));
+  const sha1 = doc.sha1s[lineNumber];
+  return ce('p', {id: `${doc.unique}-${lineNumber}`},
+            ...furigana.map(morpheme => morpheme ? doc.overrides[furiganaToBase(morpheme)] || morpheme : ['missing'])
+                .flatMap((v, i) => v.map(o => {
+                  let raw: RawAnalysis;
+                  const onClick = async () => {
+                    try {
+                      // retreive raw analysis (with ALL dictionary definitions) from local PouchDB
+                      raw = await db.get<RawAnalysis|undefined>(docLineRawToKey(doc.unique, sha1));
+                    } catch {
+                      // failing that, go back to the server to regenerate this. This will happen when the local PouchDB
+                      // is hydrated from an exported JSON file, which only stores `Doc`s
+                      const response = await nlpServer([text]);
+                      if (response && response[0] && typeof response[0] !== 'string') {
+                        raw = {sha1, text, ...response[0]};
+                      } else {
+                        raw = {sha1, text, hits: [], furigana: []};
+                      }
+                    }
+                    const click: ClickedMorpheme = {doc, lineNumber, morphemeNumber: i, raw};
+                    runInAction(() => clickStore.click = click)
+                  };
+                  if (typeof o === 'string') { return ce('span', {className: c(i), onClick}, o); }
+                  return ce('ruby', {className: c(i), onClick}, o.ruby, ce('rt', null, o.rt))
+                })));
 });
 
 //
@@ -1062,3 +1065,13 @@ function runToBase(run: string|ContextCloze) { return typeof run === 'string' ? 
 
 function defaultEbisuModel(d = Date.now()): EbisuModel { return {epoch: d, memory: ebisu.defaultModel(1.0, 2.5)}; }
 const HOURS_PER_MS = 1 / 3600e3;
+
+async function nlpServer(sentences: string[]): Promise<(v1ResSentence[])|undefined> {
+  const res = await fetch(NLP_SERVER, {
+    body: JSON.stringify({sentences}),
+    headers: {'Content-Type': 'application/json'},
+    method: 'POST',
+  });
+  if (res.ok) { return (await res.json()) as v1ResSentence[]; }
+  return undefined;
+}
