@@ -26,7 +26,7 @@ type Furigana = string|Ruby;
 interface AnnotatedAnalysis {
   sha1: string;
   text: string;
-  furigana: Furigana[][]; // overrides for each morpheme
+  furigana: (Furigana[]|undefined)[]; // overrides for each morpheme
   hits: AnnotatedHit[];   // hits can span morphemes, so no constraints on this length
 }
 interface RawAnalysis {
@@ -698,7 +698,7 @@ const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}:
   return ce(
       'p', {id: `${doc.unique}-${lineNumber}`},
       ...furigana
-          .map((morpheme, midx) => annotated?.furigana[midx] || doc.overrides[furiganaToBase(morpheme)] || morpheme)
+          .map(morpheme => morpheme ? doc.overrides[furiganaToBase(morpheme)] || morpheme : ['missing'])
           .flatMap((v, i) => v.map(o => {
             const onClick = async () => {
               const click: ClickedMorpheme = {
