@@ -558,7 +558,7 @@ function AddDocComponent({old, done}: AddDocProps) {
               furigana: response.furigana,
               kanjidic: response.kanjidic,
             };
-            annotated[sha1] = {sha1, text, hits: [], furigana: response.furigana};
+            annotated[sha1] = {sha1, text, hits: [], furigana: response.furigana.slice()};
           }
         }
 
@@ -603,8 +603,10 @@ function AddDocComponent({old, done}: AddDocProps) {
             const newRaw = raws[sha1s[addidx]];
             if (newAnnotated && newRaw) {
               // reintroduce furigana if both base and top raws match
-              newAnnotated.furigana = newRaw.furigana.map(
-                  f => (baseToFuri.get(furiganaToBase(f)) && topToFuri.get(furiganaToTop(f))) || []);
+              for (const [idx, f] of newRaw.furigana.entries()) {
+                const override = baseToFuri.has(furiganaToBase(f)) ? topToFuri.get(furiganaToTop(f)) : undefined;
+                if (override) { newAnnotated.furigana[idx] = override; }
+              }
 
               // reintroduce hits if run present
               const newHaystack = newRaw.furigana.map(furiganaToBase);
