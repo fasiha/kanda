@@ -164,6 +164,8 @@ db.changes({since: 'now', live: true, include_docs: true})
       gotandaStore.loggedIn = res.ok;
       if (text) { gotandaStore.serverMessage = text; }
     })
+    // if we're not logged in, don't even try to sync or other stuff
+    if (!res.ok) { return; }
   }
 
   const KANDA_APP_NAME = 'kanda-mobx2';
