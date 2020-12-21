@@ -585,8 +585,15 @@ function AddDocComponent({old, done}: AddDocProps) {
             const sha1 = old.sha1s[remidx];
             const a = old.annotated[sha1];
 
-            // get raw corresponding to sha1 from database
-            const raw = await db.get<RawAnalysis>(docLineRawToKey(old.unique, sha1));
+            // get raw corresponding to sha1 from database. Might be missing if
+            // 1- the raw never existed (for non-Japanese lines) or
+            // 2- the local PouchDB was hydrated without this optional data.
+            // In case of #2, we could fetch the raw from the NLP server as we do elsewhere.
+            // For simplicity, just assume #1.
+            let raw: RawAnalysis|undefined;
+            try {
+              raw = await db.get<RawAnalysis>(docLineRawToKey(old.unique, sha1));
+            } catch { raw = undefined; }
 
             for (const [fidx, f] of (a ? a.furigana : []).entries()) {
               if (f) {
