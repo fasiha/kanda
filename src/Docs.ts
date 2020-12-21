@@ -252,6 +252,11 @@ async function getDocs(singleDocUnique = ''): Promise<Docs> {
           for (const annotatedOuter of annots.rows) {
             const annotated = annotatedOuter.doc;
             if (annotated) {
+              if (annotated.furigana.length === 0) {
+                // legacy: annotation used to be created for plain text. let's delete these
+                db.upsert(annotatedOuter.id, () => ({_deleted: true}));
+                continue;
+              }
               if (annotated.furigana.some(f => !f)) {
                 // oops, we might need to refresh the furigana from raws because >0 annotated furiganas was undefined
                 const raw = await db.get<RawAnalysis|undefined>(docLineRawToKey(u, annotated.sha1));
