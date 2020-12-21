@@ -647,7 +647,7 @@ function AddDocComponent({old, done}: AddDocProps) {
           if (done) { done(); }
         });
       } else {
-        console.error('error parsing sentences: ' + res.statusText);
+        console.error('error parsing sentences');
       }
     })
   },
