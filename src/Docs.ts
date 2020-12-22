@@ -13,7 +13,6 @@ interface Doc {
   contents: string[]; // each element is a line
   sha1s: string[];
   // each entry (keyed by sha1) is a line (might be English, so undefined)
-  raws: Record<string, (undefined | RawAnalysis)>;
   annotated: Record<string, (undefined | AnnotatedAnalysis)>;
   // Furigana overrides
   overrides: Record<string, Furigana[]>;
@@ -136,7 +135,7 @@ db.changes({since: 'now', live: true, include_docs: true})
             } else {
               const dbdoc = change.doc as unknown as DbDoc;
               const target: Doc|undefined = docsStore[dbdoc.unique];
-              if (target && dbdoc.sha1s.every(sha1 => sha1 in target.raws)) {
+              if (target && dbdoc.sha1s.every(sha1 => sha1 in target.annotated)) {
                 // we didn't add any new lines (if we did, target.raws might be missing sha1s)
                 target.sha1s = dbdoc.sha1s;
                 target.contents = dbdoc.contents;
@@ -148,11 +147,7 @@ db.changes({since: 'now', live: true, include_docs: true})
               }
             }
           } else if (keyIsDocLineRaw(change.id)) {
-            const raw = change.doc as unknown as RawAnalysis;
-            // find the doc that THIS raw corresponds to. Multiple docs might have the same sha1 but I'd like to keep
-            // them separate
-            const doc = Object.values(docsStore).find(doc => change.id === docLineRawToKey(doc.unique, raw.sha1));
-            if (doc) { doc.raws[raw.sha1] = raw; }
+            // don't bother updating the document if this is the case
           } else if (keyIsDocLineAnnotated(change.id)) {
             const annotated = change.doc as unknown as AnnotatedAnalysis;
             const doc =
@@ -169,6 +164,8 @@ db.changes({since: 'now', live: true, include_docs: true})
       gotandaStore.loggedIn = res.ok;
       if (text) { gotandaStore.serverMessage = text; }
     })
+    // if we're not logged in, don't even try to sync or other stuff
+    if (!res.ok) { return; }
   }
 
   const KANDA_APP_NAME = 'kanda-mobx2';
@@ -245,29 +242,30 @@ async function getDocs(singleDocUnique = ''): Promise<Docs> {
   const startkey = docUniqueToKey(singleDocUnique);
   const docsFound = await db.allDocs<DbDoc>({startkey, endkey: startkey + '\ufe0f', include_docs: true});
 
-  const rawsFound = await Promise.all(docsFound.rows.flatMap(doc => {
-    if (!doc.doc) { return []; }
-    const u = doc.doc.unique;
-    const sha1s = doc.doc.sha1s;
-    return db.allDocs<RawAnalysis>({keys: sha1s.map(sha1 => docLineRawToKey(u, sha1)), include_docs: true})
-        .then(lines => {
-          const ret: Record<string, RawAnalysis> = {};
-          for (const line of lines.rows) {
-            if (line.doc) { ret[line.doc.sha1] = line.doc; }
-          }
-          return ret;
-        });
-  }));
-  // exact same logic as above except find all docLineAnnotatedToKey/AnnotatedAnalysis docs
   const annotatedFound = await Promise.all(docsFound.rows.flatMap(doc => {
     if (!doc.doc) { return []; }
     const u = doc.doc.unique;
     const sha1s = doc.doc.sha1s;
     return db.allDocs<AnnotatedAnalysis>({keys: sha1s.map(sha1 => docLineAnnotatedToKey(u, sha1)), include_docs: true})
-        .then(lines => {
+        .then(async annots => {
           const ret: Record<string, AnnotatedAnalysis> = {};
-          for (const line of lines.rows) {
-            if (line.doc) { ret[line.doc.sha1] = line.doc; }
+          for (const annotatedOuter of annots.rows) {
+            const annotated = annotatedOuter.doc;
+            if (annotated) {
+              if (annotated.furigana.length === 0) {
+                // legacy: annotation used to be created for plain text. let's delete these
+                db.upsert(annotatedOuter.id, () => ({_deleted: true}));
+                continue;
+              }
+              if (annotated.furigana.some(f => !f)) {
+                // oops, we might need to refresh the furigana from raws because >0 annotated furiganas was undefined
+                const raw = await db.get<RawAnalysis|undefined>(docLineRawToKey(u, annotated.sha1));
+                annotated.furigana = annotated.furigana.map((f, idx) => f || raw.furigana[idx]);
+                // upsert it back in to the database so we don't have to do this next time
+                db.upsert(docLineAnnotatedToKey(u, annotated.sha1), doc => ({...doc, furigana: annotated.furigana}));
+              }
+              ret[annotated.sha1] = annotated;
+            }
           }
           return ret;
         });
@@ -284,7 +282,6 @@ async function getDocs(singleDocUnique = ''): Promise<Docs> {
         overrides: doc.overrides,
         contents: doc.contents,
         sha1s: doc.sha1s,
-        raws: rawsFound[idx],
         annotated: annotatedFound[idx],
       };
       ret[doc.unique] = obj;
@@ -383,6 +380,7 @@ interface ClickedMorpheme {
   doc: Doc;
   lineNumber: number;
   morphemeNumber: number;
+  raw: RawAnalysis|undefined;
 }
 const clickStore = observable({click: undefined} as {click?: ClickedMorpheme});
 
@@ -391,11 +389,7 @@ const clickStore = observable({click: undefined} as {click?: ClickedMorpheme});
   action(() => {
     wordIdsStore.replace(memories.map(m => [m.wordId, Object.keys(m.ebisus)]));
 
-    for (const [k, v] of Object.entries(docs)) {
-      docsStore[k] = observable(v, {raws: false});
-      // Above, use `raws:false` as override to omit `raws`, wihch never change, from being observed.
-      // This makes loading *much* faster.
-    }
+    for (const [k, v] of Object.entries(docs)) { docsStore[k] = observable(v); }
   })();
 })();
 
@@ -536,14 +530,9 @@ function AddDocComponent({old, done}: AddDocProps) {
       // Don't resubmit old sentences to server
       const oldLinesToLino = new Map(old ? old.contents.map((line, i) => [line, i]) : []);
       const linesAdded = old ? newContents.filter(line => !oldLinesToLino.has(line)) : newContents;
-      const res = await fetch(NLP_SERVER, {
-        body: JSON.stringify({sentences: linesAdded}),
-        headers: {'Content-Type': 'application/json'},
-        method: 'POST',
-      });
-      if (res.ok) {
-        const resData: v1ResSentence[] = await res.json();
-        const raws: Doc['raws'] = {};
+      const resData = await nlpServer(linesAdded);
+      if (resData) {
+        const raws: Record<string, undefined|RawAnalysis> = {};
         const annotated: Doc['annotated'] = {};
         const sha1s: string[] = [];                             // should be same length as newContents
         const addedSha1sToIdx: Map<string, number> = new Map(); // only ones that weren't in old
@@ -555,7 +544,6 @@ function AddDocComponent({old, done}: AddDocProps) {
           if (oldhit !== undefined) {
             const sha1 = old?.sha1s[oldhit] || '';
             sha1s.push(sha1);
-            raws[sha1] = old?.raws[oldhit];
             annotated[sha1] = old?.annotated[oldhit];
             continue;
           }
@@ -572,7 +560,7 @@ function AddDocComponent({old, done}: AddDocProps) {
               furigana: response.furigana,
               kanjidic: response.kanjidic,
             };
-            annotated[sha1] = {sha1, text, hits: [], furigana: Array.from(Array(response.furigana.length))};
+            annotated[sha1] = {sha1, text, hits: [], furigana: response.furigana.slice()};
           }
         }
 
@@ -596,14 +584,25 @@ function AddDocComponent({old, done}: AddDocProps) {
           for (const remidx of indexRemoved) {
             const sha1 = old.sha1s[remidx];
             const a = old.annotated[sha1];
+
+            // get raw corresponding to sha1 from database. Might be missing if
+            // 1- the raw never existed (for non-Japanese lines) or
+            // 2- the local PouchDB was hydrated without this optional data.
+            // In case of #2, we could fetch the raw from the NLP server as we do elsewhere.
+            // For simplicity, just assume #1.
+            let raw: RawAnalysis|undefined;
+            try {
+              raw = await db.get<RawAnalysis>(docLineRawToKey(old.unique, sha1));
+            } catch { raw = undefined; }
+
             for (const [fidx, f] of (a ? a.furigana : []).entries()) {
               if (f) {
                 baseToFuri.set(furiganaToBase(f), f);
-                topToFuri.set(furiganaToTop(old.raws[sha1]?.furigana[fidx] || []), f);
+                topToFuri.set(furiganaToTop(raw?.furigana[fidx] || ['<none>']), f);
               }
             }
             for (const h of (a ? a.hits : [])) {
-              const furiganaBase = (old.raws[sha1]?.furigana.slice(h.startIdx, h.endIdx) || []).map(furiganaToBase);
+              const furiganaBase = (raw?.furigana.slice(h.startIdx, h.endIdx) || []).map(furiganaToBase);
               removedHits.push({...h, furiganaBase, used: false});
             }
           }
@@ -613,8 +612,10 @@ function AddDocComponent({old, done}: AddDocProps) {
             const newRaw = raws[sha1s[addidx]];
             if (newAnnotated && newRaw) {
               // reintroduce furigana if both base and top raws match
-              newAnnotated.furigana = newRaw.furigana.map(
-                  f => (baseToFuri.get(furiganaToBase(f)) && topToFuri.get(furiganaToTop(f))) || undefined);
+              for (const [idx, f] of newRaw.furigana.entries()) {
+                const override = baseToFuri.has(furiganaToBase(f)) ? topToFuri.get(furiganaToTop(f)) : undefined;
+                if (override) { newAnnotated.furigana[idx] = override; }
+              }
 
               // reintroduce hits if run present
               const newHaystack = newRaw.furigana.map(furiganaToBase);
@@ -658,7 +659,7 @@ function AddDocComponent({old, done}: AddDocProps) {
           if (done) { done(); }
         });
       } else {
-        console.error('error parsing sentences: ' + res.statusText);
+        console.error('error parsing sentences');
       }
     })
   },
@@ -683,14 +684,13 @@ interface SentenceProps {
   lineNumber: number;
 }
 const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}: SentenceProps) {
-  const raw = doc.raws[doc.sha1s[lineNumber]];
   const annotated = doc.annotated[doc.sha1s[lineNumber]];
-  if (!raw || !annotated) {
+  if (!annotated) {
     return ce('p',
               null, //{onClick: () => setClickedHits(undefined)},
               doc.contents[lineNumber]);
   }
-  const {furigana} = raw;
+  const {furigana, text} = annotated;
 
   // a morpheme will be in a run or not. It might be in multiple runs. A run is at least one morpheme wide but can span
   // multiple whole morphemes. But here we don't need to worry about runs: just use start/endIdx.
@@ -702,19 +702,31 @@ const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}:
   }
   const c =
       idxsAnnotated.size > 0 ? ((i: number) => idxsAnnotated.has(i) ? 'annotated-text' : undefined) : () => undefined;
-  return ce(
-      'p', {id: `${doc.unique}-${lineNumber}`},
-      ...furigana
-          .map((morpheme, midx) => annotated?.furigana[midx] || doc.overrides[furiganaToBase(morpheme)] || morpheme)
-          .flatMap((v, i) => v.map(o => {
-            const click: ClickedMorpheme = {doc, lineNumber, morphemeNumber: i};
-            if (typeof o === 'string') {
-              return ce('span', {className: c(i), onClick: action('clicked string', () => clickStore.click = click)},
-                        o);
-            }
-            return ce('ruby', {className: c(i), onClick: action('clicked parsed', () => clickStore.click = click)},
-                      o.ruby, ce('rt', null, o.rt))
-          })));
+  const sha1 = doc.sha1s[lineNumber];
+  return ce('p', {id: `${doc.unique}-${lineNumber}`},
+            ...furigana.map(morpheme => morpheme ? doc.overrides[furiganaToBase(morpheme)] || morpheme : ['missing'])
+                .flatMap((v, i) => v.map(o => {
+                  let raw: RawAnalysis;
+                  const onClick = async () => {
+                    try {
+                      // retreive raw analysis (with ALL dictionary definitions) from local PouchDB
+                      raw = await db.get<RawAnalysis|undefined>(docLineRawToKey(doc.unique, sha1));
+                    } catch {
+                      // failing that, go back to the server to regenerate this. This will happen when the local PouchDB
+                      // is hydrated from an exported JSON file, which only stores `Doc`s
+                      const response = await nlpServer([text]);
+                      if (response && response[0] && typeof response[0] !== 'string') {
+                        raw = {sha1, text, ...response[0]};
+                      } else {
+                        raw = {sha1, text, hits: [], furigana: []};
+                      }
+                    }
+                    const click: ClickedMorpheme = {doc, lineNumber, morphemeNumber: i, raw};
+                    runInAction(() => clickStore.click = click)
+                  };
+                  if (typeof o === 'string') { return ce('span', {className: c(i), onClick}, o); }
+                  return ce('ruby', {className: c(i), onClick}, o.ruby, ce('rt', null, o.rt))
+                })));
 });
 
 //
@@ -723,12 +735,12 @@ const HitsComponent = observer(function HitsComponent({}: HitsProps) {
   const click = clickStore.click;
   if (!click) { return ce('div', null); }
 
-  const {doc, lineNumber, morphemeNumber} = click;
-  const raw = doc.raws[doc.sha1s[lineNumber]];
-  const annotations = doc.annotated[doc.sha1s[lineNumber]];
+  const {doc, lineNumber, morphemeNumber, raw} = click;
+  const sha1 = doc.sha1s[lineNumber];
+  // const raw = doc.raws[sha1];
+  const annotations = doc.annotated[sha1];
   if (!raw || !annotations) { return ce('div', null); }
   const docUnique = doc.unique;
-  const sha1 = doc.sha1s[lineNumber];
   const rawHits = raw.hits[morphemeNumber];
 
   const wordIds: Set<string> = new Set(annotations?.hits?.map(o => o.wordId + runToString(o.run)));
@@ -860,11 +872,12 @@ interface OverrideProps {}
 function OverrideComponent({}: OverrideProps) {
   const click = clickStore.click;
   if (!click) { return ce(Fragment); }
-  const {doc, lineNumber, morphemeNumber} = click;
-  const rawFurigana = doc.raws[doc.sha1s[lineNumber]]?.furigana[morphemeNumber] || [];
-  const furigana = doc.annotated[doc.sha1s[lineNumber]]?.furigana[morphemeNumber] || rawFurigana;
+  const {doc, lineNumber, morphemeNumber, raw} = click;
+  const rawFurigana = raw?.furigana[morphemeNumber] || [];
+  const localFurigana = doc.annotated[doc.sha1s[lineNumber]]?.furigana[morphemeNumber] || rawFurigana;
+  const baseText = furiganaToBase(localFurigana);
+  const furigana = doc.overrides[baseText] || localFurigana;
   const rubys: Ruby[] = furigana.filter(s => typeof s !== 'string') as Ruby[];
-  const baseText = furiganaToBase(furigana);
 
   const defaultTexts = rubys.map(o => o.rt);
   const defaultGlobal = baseText in doc.overrides;
@@ -1064,3 +1077,13 @@ function runToBase(run: string|ContextCloze) { return typeof run === 'string' ? 
 
 function defaultEbisuModel(d = Date.now()): EbisuModel { return {epoch: d, memory: ebisu.defaultModel(1.0, 2.5)}; }
 const HOURS_PER_MS = 1 / 3600e3;
+
+async function nlpServer(sentences: string[]): Promise<(v1ResSentence[])|undefined> {
+  const res = await fetch(NLP_SERVER, {
+    body: JSON.stringify({sentences}),
+    headers: {'Content-Type': 'application/json'},
+    method: 'POST',
+  });
+  if (res.ok) { return (await res.json()) as v1ResSentence[]; }
+  return undefined;
+}
