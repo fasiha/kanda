@@ -1,5 +1,5 @@
 import './Docs.css';
-const NLP_SERVER = 'http://127.0.0.1:8133/api/v1/sentences';
+const NLP_SERVER = 'https://curtiz-japanese-nlp.glitch.me/api/v1/sentences';
 
 /************
 Data model
