@@ -1,5 +1,5 @@
 import './Docs.css';
-const NLP_SERVER = 'https://curtiz-japanese-nlp.glitch.me/api/v1/sentences';
+const NLP_SERVER = 'http://127.0.0.1:8133/api/v1/sentences';
 
 /************
 Data model
@@ -147,12 +147,28 @@ db.changes({since: 'now', live: true, include_docs: true})
               }
             }
           } else if (keyIsDocLineRaw(change.id)) {
-            // don't bother updating the document if this is the case
+            // No need to update anything in MobX if raw analyses were added/deleted
           } else if (keyIsDocLineAnnotated(change.id)) {
-            const annotated = change.doc as unknown as AnnotatedAnalysis;
-            const doc =
-                Object.values(docsStore).find(doc => change.id === docLineAnnotatedToKey(doc.unique, annotated.sha1));
-            if (doc) { doc.annotated[annotated.sha1] = annotated; }
+            if (change.deleted) {
+              const specifics = keyToDocLineAnnotated(change.id);
+              if (specifics) {
+                const doc = docsStore[specifics.docUnique];
+                if (doc) { delete doc.annotated[specifics.sha1]; }
+              }
+            } else {
+              const annotated = change.doc as unknown as AnnotatedAnalysis;
+              const specifics = keyToDocLineAnnotated(change.id);
+              if (specifics && specifics.sha1 === annotated.sha1) {
+                const doc = docsStore[specifics.docUnique];
+                if (doc) { doc.annotated[annotated.sha1] = annotated; }
+              } else {
+                // hmm, we failed to decipher the docUnique/sha1 from the key? Maybe a manual search can still salvage
+                // this change?
+                const doc = Object.values(docsStore).find(doc => change.id ===
+                                                                 docLineAnnotatedToKey(doc.unique, annotated.sha1));
+                if (doc) { doc.annotated[annotated.sha1] = annotated; }
+              }
+            }
           }
         }));
 
@@ -226,6 +242,17 @@ function keyIsDocLineRaw(key: string) { return key.startsWith('docRaw-'); }
 function keyIsDocLineAnnotated(key: string) { return key.startsWith('docAnnotated-'); }
 function keyIsMemory(key: string) { return key.startsWith('memory-'); }
 
+function keyToDocLineAnnotated(key: string): {docUnique: string, sha1: string}|undefined {
+  if (keyIsDocLineAnnotated(key)) {
+    const hit = key.match(/^docAnnotated-(.*)-([0-9a-fA-F]+)$/);
+    if (hit) {
+      const [/* ignore first array element */, docUnique, sha1] = hit;
+      if (docUnique && sha1) { return {docUnique, sha1}; }
+    }
+  }
+  return undefined;
+}
+
 interface DbDoc {
   name: Doc['name'];
   unique: Doc['unique'];
@@ -254,7 +281,7 @@ async function getDocs(singleDocUnique = ''): Promise<Docs> {
             if (annotated) {
               if (annotated.furigana.length === 0) {
                 // legacy: annotation used to be created for plain text. let's delete these
-                db.upsert(annotatedOuter.id, () => ({_deleted: true}));
+                db.upsert(annotatedOuter.id, deleteDiffFunc);
                 continue;
               }
               if (annotated.furigana.some(f => !f)) {
@@ -327,7 +354,7 @@ async function getWeakestMemory(db: PouchDB.Database<{}>,
   return {memory: weakest, total};
 }
 
-async function deleteDoc(unique: string) { return db.upsert(docUniqueToKey(unique), () => ({_deleted: true})); }
+async function deleteDoc(unique: string) { return db.upsert(docUniqueToKey(unique), deleteDiffFunc); }
 
 async function deletedDocIds(): Promise<string[]> {
   const ret: string[] = [];
@@ -684,11 +711,30 @@ interface SentenceProps {
   lineNumber: number;
 }
 const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}: SentenceProps) {
-  const annotated = doc.annotated[doc.sha1s[lineNumber]];
+  const sha1 = doc.sha1s[lineNumber];
+  const annotated = doc.annotated[sha1];
   if (!annotated) {
-    return ce('p',
-              null, //{onClick: () => setClickedHits(undefined)},
-              doc.contents[lineNumber]);
+    const text = doc.contents[lineNumber];
+    const button = ce('button', {
+      onClick: async () => {
+        const resData = await nlpServer([text]);
+        if (resData && typeof resData[0] !== 'string') {
+          const response = resData[0];
+          {
+            const raw: RawAnalysis =
+                {sha1, text, hits: response.hits, furigana: response.furigana, kanjidic: response.kanjidic};
+            db.upsert(docLineRawToKey(doc.unique, sha1), () => raw);
+          }
+          {
+            const annotated: AnnotatedAnalysis = {sha1, text, hits: [], furigana: response.furigana.slice()};
+            db.upsert(docLineAnnotatedToKey(doc.unique, sha1), () => annotated);
+          }
+        }
+      }
+    },
+                      'annotate');
+    const details = ce('details', {className: 'trailing-details'}, ce('summary', null, '…'), button);
+    return ce('p', null, doc.contents[lineNumber], (text && text !== '\n') ? details : '');
   }
   const {furigana, text} = annotated;
 
@@ -700,33 +746,46 @@ const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}:
       for (let i = startIdx; i < endIdx; i++) { idxsAnnotated.add(i); }
     }
   }
+
+  const button = ce('button', {
+    onClick: () => {
+      db.upsert(docLineAnnotatedToKey(doc.unique, sha1), deleteDiffFunc);
+      db.upsert(docLineRawToKey(doc.unique, sha1), deleteDiffFunc);
+      // Recall: we don't mutate MobX store here, we'll let the PouchDB changes feed do that
+    }
+  },
+                    'Discard annotations');
+  const details = ce('details', {className: 'trailing-details'}, ce('summary', null, '…'), button);
   const c =
       idxsAnnotated.size > 0 ? ((i: number) => idxsAnnotated.has(i) ? 'annotated-text' : undefined) : () => undefined;
-  const sha1 = doc.sha1s[lineNumber];
-  return ce('p', {id: `${doc.unique}-${lineNumber}`},
-            ...furigana.map(morpheme => morpheme ? doc.overrides[furiganaToBase(morpheme)] || morpheme : ['missing'])
-                .flatMap((v, i) => v.map(o => {
-                  let raw: RawAnalysis;
-                  const onClick = async () => {
-                    try {
-                      // retreive raw analysis (with ALL dictionary definitions) from local PouchDB
-                      raw = await db.get<RawAnalysis|undefined>(docLineRawToKey(doc.unique, sha1));
-                    } catch {
-                      // failing that, go back to the server to regenerate this. This will happen when the local PouchDB
-                      // is hydrated from an exported JSON file, which only stores `Doc`s
-                      const response = await nlpServer([text]);
-                      if (response && response[0] && typeof response[0] !== 'string') {
-                        raw = {sha1, text, ...response[0]};
-                      } else {
-                        raw = {sha1, text, hits: [], furigana: []};
-                      }
-                    }
-                    const click: ClickedMorpheme = {doc, lineNumber, morphemeNumber: i, raw};
-                    runInAction(() => clickStore.click = click)
-                  };
-                  if (typeof o === 'string') { return ce('span', {className: c(i), onClick}, o); }
-                  return ce('ruby', {className: c(i), onClick}, o.ruby, ce('rt', null, o.rt))
-                })));
+  return ce(
+      'p',
+      {id: `${doc.unique}-${lineNumber}`},
+      ...furigana.map(morpheme => morpheme ? doc.overrides[furiganaToBase(morpheme)] || morpheme : ['missing'])
+          .flatMap((v, i) => v.map(o => {
+            let raw: RawAnalysis;
+            const onClick = async () => {
+              try {
+                // retreive raw analysis (with ALL dictionary definitions) from local PouchDB
+                raw = await db.get<RawAnalysis|undefined>(docLineRawToKey(doc.unique, sha1));
+              } catch {
+                // failing that, go back to the server to regenerate this. This will happen when the local PouchDB
+                // is hydrated from an exported JSON file, which only stores `Doc`s
+                const response = await nlpServer([text]);
+                if (response && response[0] && typeof response[0] !== 'string') {
+                  raw = {sha1, text, ...response[0]};
+                } else {
+                  raw = {sha1, text, hits: [], furigana: []};
+                }
+              }
+              const click: ClickedMorpheme = {doc, lineNumber, morphemeNumber: i, raw};
+              runInAction(() => clickStore.click = click)
+            };
+            if (typeof o === 'string') { return ce('span', {className: c(i), onClick}, o); }
+            return ce('ruby', {className: c(i), onClick}, o.ruby, ce('rt', null, o.rt))
+          })),
+      details,
+  );
 });
 
 //
@@ -1087,3 +1146,5 @@ async function nlpServer(sentences: string[]): Promise<(v1ResSentence[])|undefin
   if (res.ok) { return (await res.json()) as v1ResSentence[]; }
   return undefined;
 }
+
+const deleteDiffFunc = () => ({_deleted: true});
