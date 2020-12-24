@@ -550,149 +550,140 @@ function AddDocComponent({old, done}: AddDocProps) {
   const nameInput = ce('input', {type: 'text', value: name, onChange: e => setName(e.target.value)});
   const contentsInput =
       ce('textarea', {value: fullText, onChange: e => setContents((e.currentTarget as HTMLInputElement).value)});
-  const submit = ce('button', {
-    onClick: (async () => {
-      const newContents = fullText.split('\n');
-
-      // Don't resubmit old sentences to server
-      const oldLinesToLino = new Map(old ? old.contents.map((line, i) => [line, i]) : []);
-      const linesAdded = old ? newContents.filter(line => !oldLinesToLino.has(line)) : newContents;
-      const resData = await nlpServer(linesAdded);
-      if (resData) {
-        const raws: Record<string, undefined|RawAnalysis> = {};
-        const annotated: Doc['annotated'] = {};
-        const sha1s: string[] = [];                             // should be same length as newContents
-        const addedSha1sToIdx: Map<string, number> = new Map(); // only ones that weren't in old
-
-        let resIdx = 0;
-        for (const [idx, text] of newContents.entries()) {
-          // some of these might be in `old`
-          const oldhit = oldLinesToLino.get(text);
-          if (oldhit !== undefined) {
-            const sha1 = old?.sha1s[oldhit] || '';
-            sha1s.push(sha1);
-            annotated[sha1] = old?.annotated[oldhit];
-            continue;
-          }
-
-          const response = resData[resIdx++];
-          const sha1 = await digestMessage(text, 'sha-1');
-          sha1s.push(sha1);
-          addedSha1sToIdx.set(sha1, idx);
-          if (typeof response !== 'string') {
-            raws[sha1] = {
-              sha1,
-              text,
-              hits: response.hits,
-              furigana: response.furigana,
-              kanjidic: response.kanjidic,
-            };
-            annotated[sha1] = {sha1, text, hits: [], furigana: response.furigana.slice()};
-          }
-        }
-
-        if (sha1s.length !== newContents.length) {
-          console.error('Mismatch between lines and sha1s', {sha1s, newContents});
-        }
-
-        if (old) {
-          // check if there were any dictionary/furigana annotations in the lines that were *deleted* that we can apply
-          // to the lines that were *added*
-          const newSha1s = new Set(sha1s);
-          const indexRemoved = new Set(old.sha1s.flatMap((sha1, lino) => newSha1s.has(sha1) ? [] : lino))
-          const indexAdded = new Set(newContents.flatMap((line, lino) => oldLinesToLino.has(line) ? [] : lino))
-          // Above: indexes correspond to `sha1s` and `newContents`, i.e., line number in new text
-
-          const baseToFuri: Map<string, Furigana[]> = new Map(); // raw base string->outgoing annotated furigana
-          const topToFuri: Map<string, Furigana[]> = new Map();  // raw rt string->outgoing annotated furigana
-          const removedHits: (AnnotatedHit&{furiganaBase: string[], used: boolean})[] = [];
-          // two extra fields above: `furiganaBase` to search new strings for morphemes' bases; and `used` so we track
-          // which hits are reused
-          for (const remidx of indexRemoved) {
-            const sha1 = old.sha1s[remidx];
-            const a = old.annotated[sha1];
-
-            // get raw corresponding to sha1 from database. Might be missing if
-            // 1- the raw never existed (for non-Japanese lines) or
-            // 2- the local PouchDB was hydrated without this optional data.
-            // In case of #2, we could fetch the raw from the NLP server as we do elsewhere.
-            // For simplicity, just assume #1.
-            let raw: RawAnalysis|undefined;
-            try {
-              raw = await db.get<RawAnalysis>(docLineRawToKey(old.unique, sha1));
-            } catch { raw = undefined; }
-
-            for (const [fidx, f] of (a ? a.furigana : []).entries()) {
-              if (f) {
-                baseToFuri.set(furiganaToBase(f), f);
-                topToFuri.set(furiganaToTop(raw?.furigana[fidx] || ['<none>']), f);
-              }
-            }
-            for (const h of (a ? a.hits : [])) {
-              const furiganaBase = (raw?.furigana.slice(h.startIdx, h.endIdx) || []).map(furiganaToBase);
-              removedHits.push({...h, furiganaBase, used: false});
-            }
-          }
-
-          for (const addidx of indexAdded) {
-            const newAnnotated = annotated[sha1s[addidx]];
-            const newRaw = raws[sha1s[addidx]];
-            if (newAnnotated && newRaw) {
-              // reintroduce furigana if both base and top raws match
-              for (const [idx, f] of newRaw.furigana.entries()) {
-                const override = baseToFuri.has(furiganaToBase(f)) ? topToFuri.get(furiganaToTop(f)) : undefined;
-                if (override) { newAnnotated.furigana[idx] = override; }
-              }
-
-              // reintroduce hits if run present
-              const newHaystack = newRaw.furigana.map(furiganaToBase);
-              for (const oldHit of removedHits) {
-                if (!oldHit.used && newContents[addidx].includes(runToBase(oldHit.run))) {
-                  const oldNeedle = oldHit.furiganaBase;
-                  const hit = arraySearch(newHaystack, oldNeedle);
-                  if (hit >= 0) {
-                    const run =
-                        simplifyCloze(generateContextClozed(newHaystack.slice(0, hit).join(''), oldNeedle.join(''),
-                                                            newHaystack.slice(hit + oldNeedle.length).join('')));
-                    newAnnotated.hits.push({
-                      summary: oldHit.summary,
-                      wordId: oldHit.wordId,
-                      run,
-                      startIdx: hit,
-                      endIdx: hit + oldNeedle.length
-                    });
-                    oldHit.used = true;
-                  }
-                }
-              }
-            }
-          }
-        }
-
-        const unique = old ? old.unique : ((new Date()).toISOString());
-        const newDbDoc:
-            DbDoc = {name, unique, contents: newContents, sha1s: sha1s, overrides: old ? old.overrides : {}};
-
-        // Update the doc and all new raw/annotated (i.e., analyses for new lines)
-        // TODO delete no-longer-used raw/annotated analyses. Not urgent: it doesn't really save data until compaction
-        let promises: Promise<any>[] = [db.upsert(docUniqueToKey(unique), () => newDbDoc)];
-        for (const sha1 of addedSha1sToIdx.keys()) {
-          promises.push(db.upsert(docLineRawToKey(unique, sha1), () => raws[sha1]));
-          promises.push(db.upsert(docLineAnnotatedToKey(unique, sha1), () => annotated[sha1]));
-        }
-        // Write to local PouchDB, then run extra app stuff. Not necessary wait for PouchDB but I prefer to
-        // finish persisting to db before updating UI.
-        Promise.all(promises).then(() => {
-          if (done) { done(); }
-        });
-      } else {
-        console.error('error parsing sentences');
-      }
-    })
-  },
-                    'Submit');
+  const submit =
+      ce('button', {onClick: () => updateText(fullText.split('\n'), old).then(() => done ? done() : null)}, 'Submit');
   return ce('div', null, old ? '' : ce('h2', null, 'Create a new document'), nameInput, ce('br'), contentsInput,
             ce('br'), submit);
+}
+
+async function updateText(newContents: string[], old?: Doc) {
+  // Don't resubmit old sentences to server
+  const oldLinesToLino = new Map(old ? old.contents.map((line, i) => [line, i]) : []);
+  const linesAdded = old ? newContents.filter(line => !oldLinesToLino.has(line)) : newContents;
+  const resData = await nlpServer(linesAdded);
+  if (resData) {
+    const raws: Record<string, undefined|RawAnalysis> = {};
+    const annotated: Doc['annotated'] = {};
+    const sha1s: string[] = [];                             // should be same length as newContents
+    const addedSha1sToIdx: Map<string, number> = new Map(); // only ones that weren't in old
+
+    let resIdx = 0;
+    for (const [idx, text] of newContents.entries()) {
+      // some of these might be in `old`
+      const oldhit = oldLinesToLino.get(text);
+      if (oldhit !== undefined) {
+        const sha1 = old?.sha1s[oldhit] || '';
+        sha1s.push(sha1);
+        annotated[sha1] = old?.annotated[oldhit];
+        continue;
+      }
+
+      const response = resData[resIdx++];
+      const sha1 = await digestMessage(text, 'sha-1');
+      sha1s.push(sha1);
+      addedSha1sToIdx.set(sha1, idx);
+      if (typeof response !== 'string') {
+        raws[sha1] = {
+          sha1,
+          text,
+          hits: response.hits,
+          furigana: response.furigana,
+          kanjidic: response.kanjidic,
+        };
+        annotated[sha1] = {sha1, text, hits: [], furigana: response.furigana.slice()};
+      }
+    }
+
+    if (sha1s.length !== newContents.length) {
+      console.error('Mismatch between lines and sha1s', {sha1s, newContents});
+    }
+
+    if (old) {
+      // check if there were any dictionary/furigana annotations in the lines that were *deleted* that we can apply
+      // to the lines that were *added*
+      const newSha1s = new Set(sha1s);
+      const indexRemoved = new Set(old.sha1s.flatMap((sha1, lino) => newSha1s.has(sha1) ? [] : lino))
+      const indexAdded = new Set(newContents.flatMap((line, lino) => oldLinesToLino.has(line) ? [] : lino))
+      // Above: indexes correspond to `sha1s` and `newContents`, i.e., line number in new text
+
+      const baseToFuri: Map<string, Furigana[]> = new Map(); // raw base string->outgoing annotated furigana
+      const topToFuri: Map<string, Furigana[]> = new Map();  // raw rt string->outgoing annotated furigana
+      const removedHits: (AnnotatedHit&{furiganaBase: string[], used: boolean})[] = [];
+      // two extra fields above: `furiganaBase` to search new strings for morphemes' bases; and `used` so we track
+      // which hits are reused
+      for (const remidx of indexRemoved) {
+        const sha1 = old.sha1s[remidx];
+        const a = old.annotated[sha1];
+
+        // get raw corresponding to sha1 from database. Might be missing if
+        // 1- the raw never existed (for non-Japanese lines) or
+        // 2- the local PouchDB was hydrated without this optional data.
+        // In case of #2, we could fetch the raw from the NLP server as we do elsewhere.
+        // For simplicity, just assume #1.
+        let raw: RawAnalysis|undefined;
+        try {
+          raw = await db.get<RawAnalysis>(docLineRawToKey(old.unique, sha1));
+        } catch { raw = undefined; }
+
+        for (const [fidx, f] of (a ? a.furigana : []).entries()) {
+          if (f) {
+            baseToFuri.set(furiganaToBase(f), f);
+            topToFuri.set(furiganaToTop(raw?.furigana[fidx] || ['<none>']), f);
+          }
+        }
+        for (const h of (a ? a.hits : [])) {
+          const furiganaBase = (raw?.furigana.slice(h.startIdx, h.endIdx) || []).map(furiganaToBase);
+          removedHits.push({...h, furiganaBase, used: false});
+        }
+      }
+
+      for (const addidx of indexAdded) {
+        const newAnnotated = annotated[sha1s[addidx]];
+        const newRaw = raws[sha1s[addidx]];
+        if (newAnnotated && newRaw) {
+          // reintroduce furigana if both base and top raws match
+          for (const [idx, f] of newRaw.furigana.entries()) {
+            const override = baseToFuri.has(furiganaToBase(f)) ? topToFuri.get(furiganaToTop(f)) : undefined;
+            if (override) { newAnnotated.furigana[idx] = override; }
+          }
+
+          // reintroduce hits if run present
+          const newHaystack = newRaw.furigana.map(furiganaToBase);
+          for (const oldHit of removedHits) {
+            if (!oldHit.used && newContents[addidx].includes(runToBase(oldHit.run))) {
+              const oldNeedle = oldHit.furiganaBase;
+              const hit = arraySearch(newHaystack, oldNeedle);
+              if (hit >= 0) {
+                const run = simplifyCloze(generateContextClozed(newHaystack.slice(0, hit).join(''), oldNeedle.join(''),
+                                                                newHaystack.slice(hit + oldNeedle.length).join('')));
+                newAnnotated.hits.push({
+                  summary: oldHit.summary,
+                  wordId: oldHit.wordId,
+                  run,
+                  startIdx: hit,
+                  endIdx: hit + oldNeedle.length
+                });
+                oldHit.used = true;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const unique = old ? old.unique : ((new Date()).toISOString());
+    const newDbDoc: DbDoc = {name, unique, contents: newContents, sha1s: sha1s, overrides: old ? old.overrides : {}};
+
+    // Update the doc and all new raw/annotated (i.e., analyses for new lines)
+    // TODO delete no-longer-used raw/annotated analyses. Not urgent: it doesn't really save data until compaction
+    let promises: Promise<any>[] = [db.upsert(docUniqueToKey(unique), () => newDbDoc)];
+    for (const sha1 of addedSha1sToIdx.keys()) {
+      promises.push(db.upsert(docLineRawToKey(unique, sha1), () => raws[sha1]));
+      promises.push(db.upsert(docLineAnnotatedToKey(unique, sha1), () => annotated[sha1]));
+    }
+  } else {
+    console.error('error parsing sentences');
+  }
 }
 
 //
@@ -796,7 +787,6 @@ const HitsComponent = observer(function HitsComponent({}: HitsProps) {
 
   const {doc, lineNumber, morphemeNumber, raw} = click;
   const sha1 = doc.sha1s[lineNumber];
-  // const raw = doc.raws[sha1];
   const annotations = doc.annotated[sha1];
   if (!raw || !annotations) { return ce('div', null); }
   const docUnique = doc.unique;
