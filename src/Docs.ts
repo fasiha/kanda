@@ -706,20 +706,21 @@ const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}:
   const annotated = doc.annotated[sha1];
   const text = doc.contents[lineNumber];
 
-  const [editedText, setEditedText] = useState('');
+  const [editedText, setEditedText] = useState(undefined as string | undefined);
 
-  if (editedText) {
+  if (editedText !== undefined) {
     const input =
         ce('textarea', {value: editedText, onChange: e => setEditedText((e.currentTarget as HTMLInputElement).value)});
+    const cancel = ce('button', {onClick: () => setEditedText(undefined)}, 'Cancel');
     const submit = ce('button', {
       onClick: () => {
         const contents = doc.contents.slice(); // make a copy
         contents.splice(lineNumber, 1, ...editedText.split('\n'))
-        updateText(contents, doc).then(() => setEditedText(''));
+        updateText(contents, doc).then(() => setEditedText(undefined));
       }
     },
                       'Submit');
-    return ce('div', null, ce('h3', null, 'Edit away!'), input, submit);
+    return ce('div', null, ce('h3', null, 'Edit away!'), input, submit, cancel);
   }
 
   const editButton = ce('button', {onClick: () => setEditedText(text)}, 'Edit');
