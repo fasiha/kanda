@@ -1,5 +1,5 @@
 import './Docs.css';
-const NLP_SERVER = 'http://127.0.0.1:8133/api/v1/sentences';
+const NLP_SERVER = 'https://curtiz-japanese-nlp.glitch.me/api/v1/sentences';
 
 /************
 Data model
@@ -704,9 +704,27 @@ interface SentenceProps {
 const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}: SentenceProps) {
   const sha1 = doc.sha1s[lineNumber];
   const annotated = doc.annotated[sha1];
+  const text = doc.contents[lineNumber];
+
+  const [editedText, setEditedText] = useState('');
+
+  if (editedText) {
+    const input =
+        ce('textarea', {value: editedText, onChange: e => setEditedText((e.currentTarget as HTMLInputElement).value)});
+    const submit = ce('button', {
+      onClick: () => {
+        const contents = doc.contents.slice(); // make a copy
+        contents.splice(lineNumber, 1, ...editedText.split('\n'))
+        updateText(contents, doc).then(() => setEditedText(''));
+      }
+    },
+                      'Submit');
+    return ce('div', null, ce('h3', null, 'Edit away!'), input, submit);
+  }
+
+  const editButton = ce('button', {onClick: () => setEditedText(text)}, 'Edit');
   if (!annotated) {
-    const text = doc.contents[lineNumber];
-    const button = ce('button', {
+    const annotateButton = ce('button', {
       onClick: async () => {
         const resData = await nlpServer([text]);
         if (resData && typeof resData[0] !== 'string') {
@@ -723,11 +741,12 @@ const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}:
         }
       }
     },
-                      'annotate');
-    const details = ce('details', {className: 'trailing-details'}, ce('summary', null, '…'), button);
-    return ce('p', null, doc.contents[lineNumber], (text && text !== '\n') ? details : '');
+                              'Annotate');
+    const buttons =
+        ce('details', {className: 'trailing-details'}, ce('summary', null, '…'), annotateButton, editButton);
+    return ce('p', null, doc.contents[lineNumber], (text && text !== '\n') ? buttons : '');
   }
-  const {furigana, text} = annotated;
+  const {furigana} = annotated;
 
   // a morpheme will be in a run or not. It might be in multiple runs. A run is at least one morpheme wide but can span
   // multiple whole morphemes. But here we don't need to worry about runs: just use start/endIdx.
@@ -738,15 +757,15 @@ const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}:
     }
   }
 
-  const button = ce('button', {
+  const annotateButton = ce('button', {
     onClick: () => {
       db.upsert(docLineAnnotatedToKey(doc.unique, sha1), deleteDiffFunc);
       db.upsert(docLineRawToKey(doc.unique, sha1), deleteDiffFunc);
       // Recall: we don't mutate MobX store here, we'll let the PouchDB changes feed do that
     }
   },
-                    'Discard annotations');
-  const details = ce('details', {className: 'trailing-details'}, ce('summary', null, '…'), button);
+                            'Discard annotations');
+  const buttons = ce('details', {className: 'trailing-details'}, ce('summary', null, '…'), annotateButton, editButton);
   const c =
       idxsAnnotated.size > 0 ? ((i: number) => idxsAnnotated.has(i) ? 'annotated-text' : undefined) : () => undefined;
   return ce(
@@ -775,7 +794,7 @@ const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}:
             if (typeof o === 'string') { return ce('span', {className: c(i), onClick}, o); }
             return ce('ruby', {className: c(i), onClick}, o.ruby, ce('rt', null, o.rt))
           })),
-      details,
+      buttons,
   );
 });
 
