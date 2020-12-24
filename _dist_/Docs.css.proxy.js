@@ -60,4 +60,16 @@ a {
 
 a:hover {
   text-decoration: none;
+}
+
+details.trailing-details {
+  display: inline;
+}
+
+details.trailing-details summary {
+  display: inline;
+  /*
+  \`inline list-item\` works great in Firefox but \`list-item\` isn't supported in Safari.
+  Firefox, with just \`inline\`, \`details\`'s arrow affordance is missing.
+  */
 }`,styleEl=document.createElement("style"),codeEl=document.createTextNode(code);styleEl.type="text/css",styleEl.appendChild(codeEl),document.head.appendChild(styleEl);
