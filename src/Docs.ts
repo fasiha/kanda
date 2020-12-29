@@ -551,12 +551,12 @@ function AddDocComponent({old, done}: AddDocProps) {
   const contentsInput =
       ce('textarea', {value: fullText, onChange: e => setContents((e.currentTarget as HTMLInputElement).value)});
   const submit =
-      ce('button', {onClick: () => updateText(fullText.split('\n'), old).then(() => done ? done() : null)}, 'Submit');
+      ce('button', {onClick: () => updateText(fullText.split('\n'), name, old).then(() => done ? done() : null)}, 'Submit');
   return ce('div', null, old ? '' : ce('h2', null, 'Create a new document'), nameInput, ce('br'), contentsInput,
             ce('br'), submit);
 }
 
-async function updateText(newContents: string[], old?: Doc) {
+async function updateText(newContents: string[], name: string, old?: Doc) {
   // Don't resubmit old sentences to server
   const oldLinesToLino = new Map(old ? old.contents.map((line, i) => [line, i]) : []);
   const linesAdded = old ? newContents.filter(line => !oldLinesToLino.has(line)) : newContents;
@@ -716,7 +716,7 @@ const SentenceComponent = observer(function SentenceComponent({lineNumber, doc}:
       onClick: () => {
         const contents = doc.contents.slice(); // make a copy
         contents.splice(lineNumber, 1, ...editedText.split('\n'))
-        updateText(contents, doc).then(() => setEditedText(undefined));
+        updateText(contents, doc.name, doc).then(() => setEditedText(undefined));
       }
     },
                       'Submit');
